@@ -2,6 +2,19 @@
 
 ## High Priority
 
+### HTTP/s Client
+* [ ] Implement a HTTP/s client package, for lumen, THIS IS very important to make this good as possible.
+  * Example:
+    ```
+    import http
+
+    http.get(...)
+    http.post(...)
+    http.put(...)
+    http.delete(...)
+    ```
+    Supporting HTTP/HTTPS requests (GET, POST, PUT, DELETE, etc.).
+
 ### Package Management System
 
 * [ ] Design and implement a package management system for Lumen, similar to Python's package ecosystem.
