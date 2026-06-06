@@ -42,3 +42,17 @@
   * Validate compatibility across major Linux distributions.
   * Implement platform-specific tooling where necessary.
   * Establish automated testing and release pipelines for Linux targets.
+
+## Low Priority
+
+### Update system
+* [ ] Implement a Update system, to update the compiler when needed, for example:
+      ```bash
+      lumen update
+      ```
+
+### Make more packages -> DO as Package Management system is created.
+* [ ] Make more useful packages, to make it easier to make complex programs,
+      for example, packages for easy UI creation via ``DirectX``.
+      Or AI artitechture by porting ``torch`` to Lumen somehow.
+      Or porting ``Pillow`` but for Lumen.
