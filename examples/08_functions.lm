@@ -1,0 +1,41 @@
+# functions, closures, recursion
+
+fn fib(n):
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fn make_adder(step):
+    return fn(x):
+        return x + step
+
+fn make_counter():
+    let count = 0
+    return fn():
+        count = count + 1
+        return count
+
+fn over(threshold):
+    return fn(x):
+        return x > threshold
+
+fn apply_twice(f, x):
+    return f(f(x))
+
+fn main():
+    print(fib(10))             # 55
+
+    let add5 = make_adder(5)
+    let add100 = make_adder(100)
+    print(add5(10))            # 15
+    print(add100(10))  # 110
+    print(apply_twice(add5, 0))# 10    (0 -> 5 -> 10)
+
+    let c = make_counter()
+    print(c())                 # 1
+    print(c())                 # 2
+    print(c())  # 3
+
+    let nums = [1, 2, 3, 4, 5, 6]
+    print(nums.map(make_adder(10)))   # [11, 12, 13, 14, 15, 16]
+    print(nums.filter(over(3)))       # [4, 5, 6]

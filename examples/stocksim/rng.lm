@@ -1,0 +1,22 @@
+# stocksim: seeded PRNG
+
+struct Rng:
+    state: int
+
+impl Rng:
+    fn next(self):
+        let x = self.state % 2147483647
+        if x <= 0:
+            x = 1
+        x = (x * 48271) % 2147483647
+        return Rng(state: x)
+
+    fn unit(self):
+        return float(self.state) / 2147483647.0
+
+    fn range(self, lo, hi):
+        return lo + self.unit() * (hi - lo)
+
+    fn int_between(self, lo, hi):
+        let span = hi - lo + 1
+        return lo + (self.state % span)

@@ -1,0 +1,20 @@
+# native Win32 message box
+
+import win32ui as ui
+
+fn main():
+    ui.beep()
+
+    let w = ui.screen_width()
+    let h = ui.screen_height()
+    ui.info("Lumen UI", f"Your screen is {w} x {h} pixels.")
+
+    if ui.confirm("Lumen UI", "Do you like building UIs in Lumen?"):
+        ui.info("Great!", "Glad to hear it. 🎉")
+    else:
+        ui.warn("Aw", "Maybe the next version will win you over.")
+
+    if ui.ok_cancel("Save", "Save your work before exiting?"):
+        ui.info("Saved", "Pretend we saved everything.")
+    else:
+        ui.error("Discarded", "Changes were thrown away.")

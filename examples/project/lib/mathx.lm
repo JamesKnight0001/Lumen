@@ -1,0 +1,14 @@
+# math helpers
+
+fn square(x):
+    return x ** 2
+
+fn cube(x):
+    return x ** 3
+
+fn clamp(x, lo, hi):
+    if x < lo:
+        return lo
+    if x > hi:
+        return hi
+    return x

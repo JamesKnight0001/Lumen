@@ -1,0 +1,18 @@
+# os module
+
+import os
+
+fn main():
+    let out = os.exec("echo hello from a child process")
+    print("captured: " + out.trim())  # captured: hello from a
+
+    print("exit code: " + str(os.system("exit 0")))   # exit code: 0
+    if os.system("exit 0") == 0:
+        print("the command succeeded")
+
+    print("nonzero: " + str(os.system("exit 3")))     # nonzero: 3
+
+    print("has argv0: " + str(len(os.args()) >= 1))   # has argv0: true
+
+    os.exit(0)
+    print("never runs")

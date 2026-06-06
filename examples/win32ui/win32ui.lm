@@ -1,0 +1,48 @@
+# Win32 UI helpers
+
+extern "C" from "user32.dll":
+    fn MessageBoxA(hwnd: i64, text: i64, caption: i64, utype: i64) -> i64
+    fn MessageBeep(utype: i64) -> i64
+    fn GetSystemMetrics(idx: i64) -> i64
+
+fn MB_OK():            return 0
+fn MB_OKCANCEL():      return 1
+fn MB_YESNOCANCEL():   return 3
+fn MB_YESNO():         return 4
+fn MB_RETRYCANCEL():   return 5
+fn MB_ICON_ERROR():    return 16     # 0x10
+fn MB_ICON_QUESTION(): return 32     # 0x20
+fn MB_ICON_WARNING():  return 48     # 0x30
+fn MB_ICON_INFO():     return 64     # 0x40
+
+fn ID_OK():     return 1
+fn ID_CANCEL(): return 2
+fn ID_YES():    return 6
+fn ID_NO():     return 7
+fn ID_RETRY():  return 4
+
+fn info(title, message):
+    return MessageBoxA(0, message, title, MB_OK() + MB_ICON_INFO())
+
+fn error(title, message):
+    return MessageBoxA(0, message, title, MB_OK() + MB_ICON_ERROR())
+
+fn warn(title, message):
+    return MessageBoxA(0, message, title, MB_OK() + MB_ICON_WARNING())
+
+fn confirm(title, message):
+    let r = MessageBoxA(0, message, title, MB_YESNO() + MB_ICON_QUESTION())
+    return r == ID_YES()
+
+fn ok_cancel(title, message):
+    let r = MessageBoxA(0, message, title, MB_OKCANCEL() + MB_ICON_QUESTION())
+    return r == ID_OK()
+
+fn beep():
+    return MessageBeep(0)
+
+fn screen_width():
+    return GetSystemMetrics(0)    # SM_CXSCREEN
+
+fn screen_height():
+    return GetSystemMetrics(1)    # SM_CYSCREEN

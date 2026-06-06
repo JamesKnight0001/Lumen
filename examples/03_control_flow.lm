@@ -1,0 +1,41 @@
+# if / while / for / break / continue
+
+fn main():
+    let score = 83
+    if score >= 90:
+        print("A")
+    elif score >= 80:
+        print("B")
+    else:
+        print("C")
+
+    let i = 0
+    let total = 0
+    while i < 5:
+        total += i
+        i += 1
+    print(total)                # 0+1+2+3+4 = 10
+
+    let product = 1
+    for n in 1..6:
+        product *= n
+    print(product)              # 5! = 120
+
+    for word in ["red", "green", "blue"]:
+        print(word)
+
+    for k in 0..10:
+        if k == 3:
+            continue            # skip 3
+        if k == 6:
+            break               # stop before 6
+        print(k)                # 0 1 2 4 5
+
+    let m = 0
+    while true:
+        m += 1
+        if m % 2 == 0:
+            continue
+        if m > 5:
+            break
+        print(m)                # 1 3 5

@@ -1,0 +1,29 @@
+# string methods
+
+fn main():
+    let s = "Hello, Lumen"
+
+    let name = "Ada"
+    let n = 3
+    print(f"{name} has {n} cats, {n * 2} paws")  # Ada has 3 cats,
+
+    print(s.len())              # 12
+    print(s.upper())            # HELLO, LUMEN
+    print(s.lower())            # hello, lumen
+    print(s.contains("Lum"))    # true
+    print(s.replace("l", "L"))  # HeLLo, Lumen
+    print("  trim me  ".trim()) # trim me
+    print("a,b,c".split(","))   # [a, b, c]
+    print("-".join(["x", "y", "z"]))   # x-y-z
+    print("ab".repeat(3))       # ababab
+
+    print(s[0])                 # H
+    print(s[7:12])              # Lumen
+    print(s[:5])                # Hello
+    print(s[7:])                # Lumen
+
+    let vowels = 0
+    for ch in "education":
+        if ch in "aeiou":
+            vowels += 1
+    print(vowels)               # 5

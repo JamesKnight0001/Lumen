@@ -1,0 +1,36 @@
+# try / catch / raise
+
+fn parse_positive(s):
+    let n = int(s)
+    if n < 0:
+        raise "must be positive: " + s
+    return n
+
+fn main():
+    try:
+        print(parse_positive("42"))   # 42
+        print(parse_positive("-7"))  # raises -> jumps to
+        print("unreached")
+    catch e:
+        print("error: " + e)  # error: must be positive:
+
+    for x in [2, 0, 5]:
+        try:
+            print(20 / x)             # 10, then fault, then 4
+        catch e:
+            print("skipped: " + e)    # skipped: division by zero
+
+    try:
+        try:
+            raise "inner"
+        catch e:
+            raise "wrapped(" + e + ")"
+    catch e:
+        print("final: " + e)  # final: wrapped
+
+    try:
+        raise 404
+    catch e:
+        print("code " + e)            # code 404
+
+    print("done")  # always reached - errors

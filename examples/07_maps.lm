@@ -1,0 +1,28 @@
+# maps
+
+fn main():
+    let ages = {"ana": 30, "bo": 25, "cy": 41}
+
+    print(ages["ana"])          # 30
+    ages["dee"] = 19            # insert
+    ages["bo"] = 26             # overwrite
+    print(ages.len())           # 4
+
+    print(ages.has("cy"))       # true
+    print(ages.get("zz"))  # nil
+    print(ages.get("zz", 0))  # 0
+
+    print(ages.keys())          # ["ana", "bo", "cy", "dee"]
+    print(ages.values())        # [30, 26, 41, 19]
+    print(ages.remove("ana"))  # 30
+    print(ages.len())           # 3
+
+    let total = 0
+    for name in ages:
+        total += ages[name]
+    print(total)                # 26 + 41 + 19 = 86
+
+    let freq = {}
+    for w in ["a", "b", "a", "c", "b", "a"]:
+        freq[w] = freq.get(w, 0) + 1
+    print(freq)                 # {"a": 3, "b": 2, "c": 1}

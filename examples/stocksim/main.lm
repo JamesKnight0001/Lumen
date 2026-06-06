@@ -1,0 +1,131 @@
+# entry point
+
+import rng
+import market
+import portfolio
+import traders
+import ui
+
+fn config_days(): return 30
+fn config_seed(): return 20260601
+fn config_cash(): return 10000.0
+
+fn price_map(stocks):
+    let m = {}
+    for s in stocks:
+        m[s.symbol] = s.price
+    return m
+
+struct DayResult:
+    stocks: list
+    gen: Rng
+
+fn step_market(stocks, g):
+    let out = []
+    let r = g
+    for s in stocks:
+        let step = s.tick(r)
+        out.push(step.stock)
+        r = step.gen
+    return DayResult(stocks: out, gen: r)
+
+fn render_header(day, total_days):
+    print("")
+    print("=".repeat(60))
+    print("  LUMEN MARKETS  --  Day " + rpad(str(day), 2) + " / " + str(total_days))
+    print("=".repeat(60))
+
+fn render_market(stocks, prev_prices):
+    print(lpad("SYMBOL", 8) + lpad("PRICE", 12) + lpad("CHANGE", 12) + "   TREND")
+    print(rule(60))
+    for s in stocks:
+        let prev = prev_prices.get(s.symbol, s.price)
+        let chg = 0.0
+        if prev > 0.0:
+            chg = (s.price - prev) / prev * 100.0
+        let arrow = "="
+        if s.price > prev:
+            arrow = "^"
+        if s.price < prev:
+            arrow = "v"
+        let line = lpad(s.symbol, 8) + rpad(money(s.price), 12) + rpad(pct(chg), 12)
+        print(line + "   " + arrow + " " + bar(int(s.vol * 200.0)))
+
+fn render_book(book, prices):
+    print(rule(60))
+    print("  ACCOUNT")
+    print("    " + lpad("cash", 10) + rpad(money(book.cash), 20))
+    for sym in book.holdings.keys():
+        let n = book.holdings.get(sym, 0)
+        if n > 0:
+            let val = float(n) * prices.get(sym, 0.0)
+            print("    " + lpad(sym, 10) + rpad(str(n) + " sh", 8)
+                  + rpad(money(val), 12))
+    print("  " + rule(30))
+    print("  " + lpad("NET WORTH", 8) + rpad(money(book.net_worth(prices)), 22))
+
+fn main():
+    let days = config_days()
+    let stocks = initial_market()
+    let g = Rng(state: config_seed())
+    let book = new_portfolio(config_cash())
+    let start_cash = config_cash()
+
+    let history = {}
+    for s in stocks:
+        history[s.symbol] = [s.price]
+
+    let prev_prices = price_map(stocks)
+    let trades_done = 0
+
+    let day = 1
+    while day <= days:
+        let res = step_market(stocks, g)
+        stocks = res.stocks
+        g = res.gen
+        let prices = price_map(stocks)
+
+        for s in stocks:
+            let h = history.get(s.symbol, [])
+            h.push(s.price)
+            history[s.symbol] = h
+
+        for s in stocks:
+            let sig = momentum(history.get(s.symbol, []))
+            if sig.action == "BUY":
+                let budget = book.cash * 0.25 * sig.strength
+                let qty = int(budget / s.price)
+                if qty > 0:
+                    book = book.buy(s.symbol, qty, s.price)
+                    trades_done = trades_done + 1
+            if sig.action == "SELL":
+                let held = book.shares(s.symbol)
+                let qty = int(float(held) * sig.strength)
+                if qty > 0:
+                    book = book.sell(s.symbol, qty, s.price)
+                    trades_done = trades_done + 1
+
+        render_header(day, days)
+        render_market(stocks, prev_prices)
+        render_book(book, prices)
+
+        prev_prices = prices
+        day = day + 1
+
+    let final_prices = price_map(stocks)
+    let final_worth = book.net_worth(final_prices)
+    let profit = final_worth - start_cash
+    let roi = profit / start_cash * 100.0
+    print("")
+    print("#".repeat(60))
+    print("  FINAL REPORT  (" + str(days) + " trading days, " + str(trades_done) + " trades)")
+    print("#".repeat(60))
+    print("  " + lpad("starting cash", 16) + rpad(money(start_cash), 16))
+    print("  " + lpad("final worth", 16) + rpad(money(final_worth), 16))
+    print("  " + lpad("profit / loss", 16) + rpad(money(profit), 16))
+    print("  " + lpad("return", 16) + rpad(pct(roi), 16))
+    if profit > 0.0:
+        print("  result: the momentum trader BEAT the market open. ^")
+    if profit <= 0.0:
+        print("  result: the momentum trader took a loss this run. v")
+    print("#".repeat(60))

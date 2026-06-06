@@ -1,0 +1,23 @@
+# rand / json / time
+
+import rand
+import json
+import time
+
+fn main():
+    rand.seed(42)
+    print(rand.int(1, 6))  # a dice roll
+    print(rand.int(1, 6))
+    rand.seed(42)
+    print(rand.int(1, 6))  # reseeding reproduces the first
+
+    let data = {"name": "lumen", "tags": ["fast", "small"], "version": 62}
+    let text = json.stringify(data)
+    print(text)                    # {"name":"lumen","tags":["fast","small"],"version":62}
+    let back = json.parse(text)
+    print(back["name"])            # lumen
+    print(back["tags"][0])         # fast
+    print(json.parse("not json") == nil)  # true
+
+    print(time.format(0))          # 1970-01-01 00:00:00
+    print(time.format(1700000000)) # 2023-11-14 22:13:20

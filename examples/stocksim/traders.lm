@@ -1,0 +1,60 @@
+# stocksim: trading strategies
+
+struct Signal:
+    action: str
+    strength: f64
+
+fn hold():
+    return Signal(action: "HOLD", strength: 0.0)
+
+fn sma(hist, n):
+    let len = hist.len()
+    if len == 0:
+        return 0.0
+    let k = n
+    if k > len:
+        k = len
+    let total = 0.0
+    for i in (len - k)..len:
+        total = total + hist[i]
+    return total / float(k)
+
+fn momentum(hist):
+    if hist.len() < 5:
+        return hold()
+    let avg = sma(hist, 5)
+    let last = hist[hist.len() - 1]
+    if avg <= 0.0:
+        return hold()
+    let gap = (last - avg) / avg
+    if gap > 0.01:
+        let s = gap * 8.0
+        if s > 1.0:
+            s = 1.0
+        return Signal(action: "BUY", strength: s)
+    if gap < -0.01:
+        let s = -gap * 8.0
+        if s > 1.0:
+            s = 1.0
+        return Signal(action: "SELL", strength: s)
+    return hold()
+
+fn mean_reversion(hist):
+    if hist.len() < 10:
+        return hold()
+    let avg = sma(hist, 10)
+    let last = hist[hist.len() - 1]
+    if avg <= 0.0:
+        return hold()
+    let gap = (last - avg) / avg
+    if gap < -0.03:
+        let s = -gap * 6.0
+        if s > 1.0:
+            s = 1.0
+        return Signal(action: "BUY", strength: s)
+    if gap > 0.03:
+        let s = gap * 6.0
+        if s > 1.0:
+            s = 1.0
+        return Signal(action: "SELL", strength: s)
+    return hold()
