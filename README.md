@@ -118,5 +118,5 @@ Current limitations:
 * `examples/` - language tour and larger sample projects
 
 ## License
-
+BY James Phifer [JamesKnight0001]
 MIT
