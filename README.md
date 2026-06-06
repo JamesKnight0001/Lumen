@@ -27,7 +27,12 @@ fn main():
 ## Version
 Compiler: V0.69.0
 
-## Install
+# Install using Installer:
+[Lumen installer](https://github.com/JamesKnight0001/Lumen_installer)
+All it takes is 2 clicks, to install lumen.
+[Lumen Syntax Highlight included for VsCode]
+
+## local Install [compiler]
 
 Requirements:
 
@@ -120,6 +125,8 @@ Current limitations:
 * `docs/syntax/` - reference documentation
 * `examples/` - language tour and larger sample projects
 
+## Author
+By James Phifer [JamesKnight0001]
+
 ## License
-BY James Phifer [JamesKnight0001]
 MIT
