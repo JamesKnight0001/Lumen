@@ -24,6 +24,9 @@ fn main():
     print("ell" in "hello")
 ```
 
+## Version
+Compiler: V0.69.0
+
 ## Install
 
 Requirements:
