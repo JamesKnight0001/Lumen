@@ -1,0 +1,25 @@
+# variables and value types
+
+fn main():
+    let x = 10
+    x = x + 5
+    x += 2  # compound assignment: += -=
+    print(x)                    # 17
+
+    let i = 42  # int
+    let f = 3.5  # float
+    let s = "lumen"             # str
+    let b = true  # bool
+    let n = nil  # nil
+    print(type(i))              # int
+    print(type(f))              # f64
+    print(type(s))              # str
+    print(type(b))              # bool
+
+    print(n == nil)             # true
+    let maybe = nil
+    print(maybe != nil)         # false
+
+    print(str(i) + " / " + str(f))   # 42 / 3.5
+    print(int("100") + 1)            # 101
+    print(float(7))                  # 7.0

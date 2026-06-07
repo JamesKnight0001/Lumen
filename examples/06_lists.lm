@@ -1,0 +1,36 @@
+# lists: methods, slicing, comprehensions
+
+fn is_even(n):
+    return n % 2 == 0
+
+fn double(n):
+    return n * 2
+
+fn main():
+    let xs = [3, 1, 4, 1, 5, 9, 2, 6]
+
+    print(xs.len())             # 8
+    print(xs[0])                # 3
+    xs.push(5)                  # append
+    print(xs.pop())  # 5
+    print(xs.contains(4))       # true
+    print(xs.index(4))  # 2
+    print(xs.count(1))          # 2
+
+    print(xs[0:3])              # [3, 1, 4]
+    print(xs[5:])               # [9, 2, 6]
+
+    let ys = [3, 1, 2]
+    ys.sort()
+    print(ys)                   # [1, 2, 3]
+    ys.reverse()
+    print(ys)                   # [3, 2, 1]
+
+    print([1, 2, 3, 4].map(double))      # [2, 4, 6, 8]
+    print([1, 2, 3, 4].filter(is_even))  # [2, 4]
+
+    print([x * x for x in 0..6])              # [0, 1, 4, 9, 16, 25]
+    print([x for x in 0..20 if x % 3 == 0])   # [0, 3, 6, 9, 12, 15, 18]
+    print(sum([1, 2, 3, 4]))    # 10
+    print(min([3, 1, 2]))       # 1
+    print(max([3, 1, 2]))       # 3

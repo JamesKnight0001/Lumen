@@ -1,0 +1,46 @@
+# stocksim: immutable portfolio
+
+struct Portfolio:
+    cash: f64
+    holdings: map  # symbol(str) -> shares
+
+impl Portfolio:
+    fn shares(self, sym):
+        return self.holdings.get(sym, 0)
+
+    fn buy(self, sym, qty, price):
+        let affordable = int(self.cash / price)
+        let n = qty
+        if n > affordable:
+            n = affordable
+        if n <= 0:
+            return self
+        let new_cash = self.cash - float(n) * price
+        let h = self.holdings
+        h[sym] = self.shares(sym) + n
+        return Portfolio(cash: new_cash, holdings: h)
+
+    fn sell(self, sym, qty, price):
+        let held = self.shares(sym)
+        let n = qty
+        if n > held:
+            n = held
+        if n <= 0:
+            return self
+        let new_cash = self.cash + float(n) * price
+        let h = self.holdings
+        h[sym] = held - n
+        return Portfolio(cash: new_cash, holdings: h)
+
+    fn holdings_value(self, prices):
+        let total = 0.0
+        for sym in self.holdings.keys():
+            let n = self.holdings.get(sym, 0)
+            total = total + float(n) * prices.get(sym, 0.0)
+        return total
+
+    fn net_worth(self, prices):
+        return self.cash + self.holdings_value(prices)
+
+fn new_portfolio(start):
+    return Portfolio(cash: start, holdings: {})

@@ -1,0 +1,14 @@
+# imported greeting module
+
+fn greeting(name):
+    return f"Hello, {name}!"
+
+fn shout(s):
+    return s.upper() + "!"
+
+struct Greeter:
+    prefix: str
+
+impl Greeter:
+    fn say(self, name):
+        return self.prefix + " " + name

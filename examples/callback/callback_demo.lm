@@ -1,0 +1,18 @@
+# FFI: Lumen fn as a C callback
+
+import cffi
+
+extern "C" from "user32.dll":
+    fn EnumWindows(proc: i64, lparam: i64) -> i64
+
+fn on_window(hwnd, lparam):
+    cffi.poke_i64(lparam, cffi.peek_i64(lparam) + 1)
+    return 1
+
+fn main():
+    let counter = cffi.cbuf(8)  # an i64 the callback
+    let cb = cffi.callback(on_window)  # Lumen fn -> C
+    EnumWindows(cb, cffi.addr(counter))  # the OS calls on_window
+    let n = cffi.get_i64(counter, 0)
+    print("top-level windows enumerated: " + str(n))
+    print("callback fired at least once: " + str(n > 0))

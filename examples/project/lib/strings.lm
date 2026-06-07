@@ -1,0 +1,14 @@
+# string helpers
+
+fn repeat(s, n):
+    let out = ""
+    let i = 0
+    while i < n:
+        out = out + s
+        i += 1
+    return out
+
+fn pad_left(s, width):
+    if s.len() >= width:
+        return s
+    return repeat(" ", width - s.len()) + s

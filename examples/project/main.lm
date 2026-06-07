@@ -1,0 +1,14 @@
+# entry point
+
+import report
+import lib.mathx
+
+fn main():
+    print("== powers table ==")
+    for row in report.powers_table(5):
+        print(row.render())
+
+    print("== clamp ==")
+    print(mathx.clamp(15, 0, 10))
+    print(mathx.clamp(-3, 0, 10))
+    print(mathx.cube(3))

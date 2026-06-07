@@ -1,0 +1,51 @@
+# stocksim: dashboard
+
+fn fixed(x, places):
+    let neg = x < 0.0
+    let v = x
+    if neg:
+        v = -v
+    let scale = 1
+    for i in 0..places:
+        scale = scale * 10
+    let scaled = int(v * float(scale) + 0.5)   # round half up
+    let whole = scaled / scale
+    let frac = scaled % scale
+    let fs = str(frac)
+    while fs.len() < places:
+        fs = "0" + fs
+    let out = str(whole)
+    if places > 0:
+        out = out + "." + fs
+    if neg:
+        out = "-" + out
+    return out
+
+fn money(x):
+    return "$" + fixed(x, 2)
+
+fn rpad(s, w):
+    let out = s
+    while out.len() < w:
+        out = " " + out
+    return out
+
+fn lpad(s, w):
+    let out = s
+    while out.len() < w:
+        out = out + " "
+    return out
+
+fn rule(n):
+    return "-".repeat(n)
+
+fn pct(p):
+    let s = fixed(p, 2)
+    if p >= 0.0:
+        s = "+" + s
+    return s + "%"
+
+fn bar(n):
+    if n <= 0:
+        return ""
+    return "#".repeat(n)

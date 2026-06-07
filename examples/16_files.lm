@@ -1,0 +1,34 @@
+# file I/O
+
+import os
+
+fn main():
+    let dir = "lumen_demo_dir"
+
+    if os.exists(dir):
+        for name in os.listdir(dir):
+            os.remove(dir + "/" + name)
+        os.rmdir(dir)
+
+    os.mkdir(dir)
+    print(os.is_dir(dir))            # true
+
+    let path = dir + "/note.txt"
+    os.write(path, "line one\n")
+    os.append(path, "line two\n")
+    print(os.is_file(path))          # true
+    print(os.exists(path))           # true
+
+    print(os.read(path))  # line one / line
+
+    print(os.listdir(dir))           # ["note.txt"]
+
+    os.rename(path, dir + "/renamed.txt")
+    print(os.listdir(dir))           # ["renamed.txt"]
+
+    print(os.read(dir + "/gone.txt") == nil)   # true
+    print(os.is_file(dir + "/gone.txt"))        # false
+
+    os.remove(dir + "/renamed.txt")
+    os.rmdir(dir)
+    print(os.exists(dir))            # false

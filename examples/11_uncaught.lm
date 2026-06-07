@@ -1,0 +1,6 @@
+# An uncaught error reports its source line and exits 1, in both backends.
+
+fn main():
+    print("about to divide")
+    let bad = 10 / 0          # fault reported here
+    print(bad)                # never reached

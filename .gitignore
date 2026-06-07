@@ -1,0 +1,10 @@
+compiler/target/
+*.exe
+*.s
+*.o
+# scratch dir created/removed by examples/16_files.lm during the test run
+lumen_demo_dir/
+# local-only: dev tooling, not part of the published repo
+bench/
+tests/
+./CHANGELOG.md

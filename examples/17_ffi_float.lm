@@ -1,0 +1,17 @@
+# FFI: float args/returns
+
+extern "C" from "msvcrt.dll":
+    fn sqrt(x: f64) -> f64
+    fn pow(base: f64, exp: f64) -> f64
+    fn fmod(x: f64, y: f64) -> f64
+    fn atan2(y: f64, x: f64) -> f64
+    fn ldexp(x: f64, n: i64) -> f64  # mixed: float arg +
+
+fn main():
+    print(sqrt(2.0))          # 1.4142135623730951
+    print(sqrt(144.0))        # 12.0
+    print(pow(2.0, 10.0))     # 1024.0
+    print(fmod(10.0, 3.0))    # 1.0
+    print(atan2(1.0, 1.0))    # 0.7853981633974483
+    print(ldexp(1.5, 3))  # 12.0
+    print(sqrt(2))  # 1.4142135623730951

@@ -1,0 +1,110 @@
+# Direct2D GPU window via FFI
+
+import cffi
+
+extern "C" from "kernel32.dll":
+    fn GetModuleHandleA(name: i64) -> i64
+extern "C" from "user32.dll":
+    fn RegisterClassExA(wc: i64) -> i64
+    fn CreateWindowExA(ex: i64, cls: i64, title: i64, style: i64, x: i64, y: i64, w: i64, h: i64, par: i64, menu: i64, inst: i64, p: i64) -> i64
+    fn DefWindowProcA(h: i64, m: i64, wp: i64, lp: i64) -> i64
+    fn ShowWindow(h: i64, cmd: i64) -> i64
+    fn PeekMessageA(msg: i64, h: i64, a: i64, b: i64, remove: i64) -> i64
+    fn TranslateMessage(msg: i64) -> i64
+    fn DispatchMessageA(msg: i64) -> i64
+    fn PostQuitMessage(code: i64) -> i64
+    fn LoadCursorA(inst: i64, name: i64) -> i64
+    fn SetWindowLongPtrA(h: i64, idx: i64, val: i64) -> i64
+    fn GetWindowLongPtrA(h: i64, idx: i64) -> i64
+    fn ValidateRect(h: i64, rect: i64) -> i64
+extern "C" from "d2d1.dll":
+    fn D2D1CreateFactory(ftype: i64, riid: i64, opts: i64, pp: i64) -> i64
+
+fn f4(a, b, c, d):
+    let v = cffi.cbuf(16)
+    cffi.set_f32(v, 0, a)
+    cffi.set_f32(v, 4, b)
+    cffi.set_f32(v, 8, c)
+    cffi.set_f32(v, 12, d)
+    return v
+
+fn wndproc(hwnd, msg, wparam, lparam):
+    if msg == 15:                                        # WM_PAINT
+        let rt = GetWindowLongPtrA(hwnd, 0 - 21)         # GWLP_USERDATA
+        if rt != 0:
+            cffi.vcall(rt, 48, nil, 0)  # BeginDraw
+
+            let bg = f4(0.15, 0.18, 0.32, 1.0)           # deep blue
+            let cargs = cffi.cbuf(8)
+            cffi.set_ptr(cargs, 0, cffi.addr(bg))
+            cffi.vcall(rt, 47, cargs, 0)  # Clear
+
+            let orange = f4(0.95, 0.55, 0.15, 1.0)
+            let bpp = cffi.cbuf(8)
+            let bargs = cffi.cbuf(24)
+            cffi.set_ptr(bargs, 0, cffi.addr(orange))
+            cffi.set_ptr(bargs, 8, 0)
+            cffi.set_ptr(bargs, 16, cffi.addr(bpp))
+            cffi.vcall(rt, 8, bargs, 0)                  # CreateSolidColorBrush
+            let brush = cffi.get_ptr(bpp, 0)
+
+            let rect = f4(80.0, 80.0, 360.0, 260.0)      # l, t, r, b
+            let rargs = cffi.cbuf(16)
+            cffi.set_ptr(rargs, 0, cffi.addr(rect))
+            cffi.set_ptr(rargs, 8, brush)
+            cffi.vcall(rt, 17, rargs, 0)  # FillRectangle
+
+            if brush != 0:
+                cffi.vcall(brush, 2, nil, 0)  # brush->Release
+            cffi.vcall(rt, 49, nil, 0)  # EndDraw
+        ValidateRect(hwnd, 0)                             # else WM_PAINT loops forever
+        return 0
+    if msg == 2:                                          # WM_DESTROY
+        PostQuitMessage(0)
+        return 0
+    return DefWindowProcA(hwnd, msg, wparam, lparam)
+
+fn main():
+    let iid = cffi.guid("06152247-6f50-465a-9245-118bfd3b6007")    # IID_ID2D1Factory
+    let fpp = cffi.cbuf(8)
+    D2D1CreateFactory(0, cffi.addr(iid), 0, cffi.addr(fpp))
+    let factory = cffi.get_ptr(fpp, 0)
+
+    let hinst = GetModuleHandleA(0)
+    let cls = "LumenD2DWindow"
+    let wc = cffi.cbuf(80)
+    cffi.set_i32(wc, 0, 80)                              # cbSize
+    cffi.set_i32(wc, 4, 3)                               # CS_HREDRAW|CS_VREDRAW
+    cffi.set_ptr(wc, 8, cffi.callback(wndproc))          # lpfnWndProc
+    cffi.set_ptr(wc, 24, hinst)
+    cffi.set_ptr(wc, 40, LoadCursorA(0, 32512))          # IDC_ARROW
+    cffi.set_ptr(wc, 64, cffi.str_ptr(cls))              # lpszClassName
+    RegisterClassExA(cffi.addr(wc))
+
+    let hwnd = CreateWindowExA(0, cffi.str_ptr(cls), cffi.str_ptr("Lumen + Direct2D"), 13565952, 100, 100, 480, 360, 0, 0, hinst, 0)
+
+    let rtp = cffi.cbuf(28)                              # D2D1_RENDER_TARGET_PROPERTIES
+    cffi.set_i32(rtp, 8, 1)                              # alphaMode = PREMULTIPLIED
+    let hrtp = cffi.cbuf(24)                             # D2D1_HWND_RENDER_TARGET_PROPERTIES
+    cffi.set_ptr(hrtp, 0, hwnd)
+    cffi.set_i32(hrtp, 8, 480)
+    cffi.set_i32(hrtp, 12, 360)
+    let pp = cffi.cbuf(8)
+    let args = cffi.cbuf(24)
+    cffi.set_ptr(args, 0, cffi.addr(rtp))
+    cffi.set_ptr(args, 8, cffi.addr(hrtp))
+    cffi.set_ptr(args, 16, cffi.addr(pp))
+    cffi.vcall(factory, 14, args, 0)
+    SetWindowLongPtrA(hwnd, 0 - 21, cffi.get_ptr(pp, 0))   # stash rt in GWLP_USERDATA
+
+    ShowWindow(hwnd, 5)
+    print("window open - close it to exit")
+    let msg = cffi.cbuf(48)
+    let running = 1
+    while running == 1:
+        if PeekMessageA(cffi.addr(msg), 0, 0, 0, 1) != 0:
+            if cffi.get_i32(msg, 8) == 18:               # MSG.message; WM_QUIT
+                running = 0
+            TranslateMessage(cffi.addr(msg))
+            DispatchMessageA(cffi.addr(msg))
+    print("window closed")

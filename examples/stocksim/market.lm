@@ -1,0 +1,38 @@
+# stocksim: price model
+
+import rng
+
+struct Stock:
+    symbol: str
+    price: f64
+    drift: f64  # mean daily return
+    vol: f64  # daily volatility
+
+struct Step:
+    stock: Stock
+    gen: Rng
+
+impl Stock:
+    fn tick(self, g):
+        let r = g
+        let acc = 0.0
+        for i in 0..4:
+            r = r.next()
+            acc = acc + (r.unit() * 2.0 - 1.0)
+        let shock = acc / 4.0  # roughly normal-ish, in [-1,
+        let ret = self.drift + self.vol * shock * 3.0
+        let np = self.price * (1.0 + ret)
+        if np < 0.01:
+            np = 0.01
+        let updated = Stock(symbol: self.symbol, price: np,
+                            drift: self.drift, vol: self.vol)
+        return Step(stock: updated, gen: r)
+
+fn initial_market():
+    return [
+        Stock(symbol: "LUMN", price: 100.0, drift: 0.0012, vol: 0.018),
+        Stock(symbol: "RUST", price: 240.0, drift: 0.0008, vol: 0.012),
+        Stock(symbol: "PYTH", price: 55.0,  drift: 0.0003, vol: 0.030),
+        Stock(symbol: "NODE", price: 78.0,  drift: 0.0005, vol: 0.025),
+        Stock(symbol: "JAVA", price: 130.0, drift: 0.0002, vol: 0.010),
+    ]
