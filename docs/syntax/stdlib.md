@@ -2,7 +2,7 @@
 
 This is the reference for everything Lumen hands you out of the box. The global
 builtins and the string, list, and map methods need no import at all; the modules
-down at the bottom (`math`, `os`, `rand`, `time`, `json`, `cffi`) come in with an
+down at the bottom (`math`, `os`, `rand`, `time`, `json`, `net`, `cffi`) come in with an
 `import`. Whichever you reach for, every entry behaves identically under the
 interpreter and the compiled binary.
 
@@ -202,6 +202,63 @@ print(data["n"])                                  # 3
 
 `json.stringify(v)` (lists→arrays, maps→objects, `nil`→`null`, functions/structs
 →`null`) and `json.parse(s)` (objects→maps, arrays→lists, or `nil` if invalid).
+
+## The `net` module (`import net`)
+
+TCP and UDP sockets backed by the OS (Winsock2 on Windows). A socket is an `int`
+handle; functions that create one return `-1` on failure. `recv`/`recvfrom`
+return text (decoded like `os.read`); use the `cffi` module if you need raw
+binary framing. All `net` calls are Windows-only and raise on other platforms.
+
+| Function | Does | Returns |
+|----------|------|---------|
+| `net.listen(host, port)` | Open a TCP listening socket (`host=""` = all interfaces, `port=0` = OS-assigned) | socket, or `-1` |
+| `net.accept(sock)` | Accept the next pending TCP connection (blocks) | connection socket, or `-1` |
+| `net.connect(host, port)` | Open a TCP connection to `host:port` | socket, or `-1` |
+| `net.udp(host, port)` | Open a UDP socket; binds when `host`/`port` given (`port=0` = OS-assigned) | socket, or `-1` |
+| `net.send(sock, data)` | Send `data` (string) on a connected socket | bytes sent, or `-1` |
+| `net.recv(sock, max)` | Receive up to `max` bytes | text, or `nil` on error/timeout |
+| `net.sendto(sock, data, host, port)` | Send a UDP datagram to `host:port` | bytes sent, or `-1` |
+| `net.recvfrom(sock, max)` | Receive a UDP datagram | `{data, host, port}`, or `nil` |
+| `net.close(sock)` | Close a socket | `nil` |
+| `net.shutdown(sock, how)` | Shut down a connection (`0`=recv, `1`=send, `2`=both) | `0`, or `-1` |
+| `net.set_timeout(sock, ms)` | Set send+recv timeout in milliseconds (`0` = block forever) | `0`, or `-1` |
+| `net.set_blocking(sock, on)` | Set blocking (`1`) or non-blocking (`0`) mode | `0`, or `-1` |
+| `net.set_opt(sock, name, val)` | Set a socket option (see below) | `0`, or `-1` |
+| `net.poll(sock, ms)` | Wait up to `ms` (`-1` = forever) for readiness; bit `1`=readable, bit `2`=writable | bitmask, or `-1` |
+| `net.resolve(host)` | Resolve a hostname to a dotted IPv4 string | IP string, or `nil` |
+| `net.local_port(sock)` | The local port a socket is bound to (useful after `port=0`) | port, or `-1` |
+| `net.errno()` | The last socket error code (Winsock `WSAGetLastError`) | int |
+
+`set_opt` names: `"reuseaddr"`, `"keepalive"`, `"broadcast"`, `"sndbuf"`,
+`"rcvbuf"` (socket level) and `"nodelay"` (TCP level, disables Nagle). Pass `1`
+to enable a flag, or a byte count for the buffer sizes.
+
+```lumen
+import net
+
+fn main():
+    # TCP echo round-trip over loopback
+    let srv = net.listen("127.0.0.1", 0)   # OS picks a free port
+    let port = net.local_port(srv)
+    let cli = net.connect("127.0.0.1", port)
+    let conn = net.accept(srv)
+
+    net.send(cli, "ping")
+    print(net.recv(conn, 1024))            # ping
+    net.close(cli); net.close(conn); net.close(srv)
+
+    # UDP datagram
+    let a = net.udp("127.0.0.1", 0)
+    let b = net.udp("", 0)
+    net.sendto(b, "hi", "127.0.0.1", net.local_port(a))
+    let msg = net.recvfrom(a, 1024)
+    print(msg["data"] + " from " + msg["host"])   # hi from 127.0.0.1
+```
+
+For blocking servers, set a recv timeout with `net.set_timeout` or switch to
+non-blocking mode with `net.set_blocking` and drive readiness via `net.poll`.
+Worked demo: `examples/19_net.lm`.
 
 ## The `cffi` module (`import cffi`)
 

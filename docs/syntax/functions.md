@@ -78,7 +78,7 @@ fn main():
 ```
 
 Pair closures with [`list.map` and `list.filter`](lists.md) for compact
-transformations s- the `fn(...)` literal can go straight into the method call:
+transformations  the `fn(...)` literal can go straight into the method call:
 
 ```lumen
 let evens = [1, 2, 3, 4, 5, 6].filter(fn(v): v % 2 == 0)   # [2, 4, 6]

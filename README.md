@@ -25,7 +25,7 @@ fn main():
 ```
 
 ## Version
-Compiler: V0.73.0
+Compiler: V0.74.0
 
 # Install using Installer:
 [Lumen installer](https://github.com/JamesKnight0001/Lumen_installer)
@@ -70,6 +70,9 @@ lumen -c 'fn main(): print(2 ** 10)'
 | `lumen -c "<src>"`    | Run inline source              |
 | `lumen check <file>`  | Parse and compile-check        |
 | `lumen emit <file>`   | Emit generated assembly        |
+| `lumen install [pkg]` | Install packages into `lumen_modules/` |
+| `lumen venv <dir>`    | Create an isolated package environment |
+| `lumen update`        | Download + install a newer compiler |
 | `lumen doctor`        | Check the native-build toolchain (gcc, windres) |
 | `lumen ast <file>`    | Print AST                      |
 | `lumen tokens <file>` | Print token stream             |
@@ -83,8 +86,9 @@ lumen -c 'fn main(): print(2 ** 10)'
 * Modules and imports
 * f-strings
 * Native C FFI via `extern`
+* TCP/UDP sockets (`net`) and a package manager (`lumen install`, `lumen venv`)
 
-Built-in modules include `math`, `os`, `json`, `rand`, and `time`.
+Built-in modules include `math`, `os`, `json`, `rand`, `time`, and `net`.
 
 ## Architecture
 

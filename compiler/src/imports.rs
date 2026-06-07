@@ -9,14 +9,50 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 fn module_to_path(base_dir: &Path, module: &str) -> (PathBuf, String) {
-    let mut p = base_dir.to_path_buf();
     let segs: Vec<&str> = module.split('.').collect();
-    for s in &segs {
-        p.push(s);
-    }
-    p.set_extension("lm");
     let access = segs.last().copied().unwrap_or(module).to_string();
-    (p, access)
+
+    // First the compiler's original rule: sibling file relative to the entry
+    // dir. If that exists, use it (keeps every existing project working).
+    let mut sib = base_dir.to_path_buf();
+    for s in &segs {
+        sib.push(s);
+    }
+    sib.set_extension("lm");
+    if sib.exists() {
+        return (sib, access);
+    }
+
+    // Else search package dirs (installed via `lumen install`): the active venv
+    // (LUMEN_VENV) then a project-local lumen_modules/. Lets installed packages
+    // resolve by bare name without changing the sibling-import behavior above.
+    for root in module_search_roots() {
+        let mut p = root;
+        for s in &segs {
+            p.push(s);
+        }
+        p.set_extension("lm");
+        if p.exists() {
+            return (p, access);
+        }
+    }
+
+    // Nothing matched: return the sibling path so the existing "cannot read
+    // module" error points at the most expected location.
+    (sib, access)
+}
+
+// Package search roots, highest precedence first: active venv, then a
+// project-local lumen_modules/. Mirrors pkg::modules_dir but lists all roots.
+fn module_search_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(v) = std::env::var("LUMEN_VENV") {
+        if !v.is_empty() {
+            roots.push(Path::new(&v).join("lumen_modules"));
+        }
+    }
+    roots.push(PathBuf::from("lumen_modules"));
+    roots
 }
 
 pub fn collect(

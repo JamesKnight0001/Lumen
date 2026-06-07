@@ -21,6 +21,8 @@
 #include <time.h>
 
 #ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #define popen _popen
 #define pclose _pclose
@@ -866,10 +868,86 @@ static void print_val(LumenVal v, int top) {
 void lumen_print(LumenVal v) { print_val(v, 1); printf("\n"); }
 
 /* Multi-arg print(): each value at top-level, space-separated, one trailing
-   newline s- matching the interpreter's parts.join(" ") + newline. */
+   newline  matching the interpreter's parts.join(" ") + newline. */
 void lumen_print_part(LumenVal v) { print_val(v, 1); }
 void lumen_print_space(void) { printf(" "); }
 void lumen_print_nl(void) { printf("\n"); }
+
+/* Growable string buffer + a buffer-writing mirror of print_val, so str() of a
+   list/map/struct/fn produces the SAME text print() shows. Both backends must
+   agree: this matches the interpreter's Display (top-level unquoted strings,
+   nested strings quoted via repr). */
+typedef struct { char *p; size_t len, cap; } SBuf;
+static void sb_need(SBuf *b, size_t extra) {
+    if (b->len + extra + 1 > b->cap) {
+        while (b->len + extra + 1 > b->cap) b->cap = b->cap ? b->cap * 2 : 64;
+        b->p = realloc(b->p, b->cap);
+    }
+}
+static void sb_puts(SBuf *b, const char *s) {
+    size_t n = strlen(s);
+    sb_need(b, n);
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = 0;
+}
+static void sfmt_val(SBuf *b, LumenVal v, int top) {
+    char nb[64];
+    if (lumen_is_double(v)) {
+        fmt_double(lumen_to_double(v), nb, sizeof nb);
+        sb_puts(b, nb);
+    } else if (lumen_is_int(v)) {
+        snprintf(nb, sizeof nb, "%lld", (long long)lumen_to_int(v));
+        sb_puts(b, nb);
+    } else if (lumen_is_bool(v)) {
+        sb_puts(b, (v & 1) ? "true" : "false");
+    } else if (lumen_is_nil(v)) {
+        sb_puts(b, "nil");
+    } else if (lumen_is_ptr(v)) {
+        LumenObj *o = unbox_ptr(v);
+        if (o->kind == OBJ_STR) {
+            LumenStr *s = (LumenStr *)o;
+            if (top) { sb_puts(b, s->data); }
+            else { sb_puts(b, "\""); sb_puts(b, s->data); sb_puts(b, "\""); }
+        } else if (o->kind == OBJ_LIST) {
+            LumenList *l = (LumenList *)o;
+            sb_puts(b, "[");
+            for (size_t i = 0; i < l->len; i++) { if (i) sb_puts(b, ", "); sfmt_val(b, l->items[i], 0); }
+            sb_puts(b, "]");
+        } else if (o->kind == OBJ_STRUCT) {
+            LumenStruct *s = (LumenStruct *)o;
+            sb_puts(b, s->name); sb_puts(b, "(");
+            for (size_t i = 0; i < s->nfields; i++) {
+                if (i) sb_puts(b, ", ");
+                sb_puts(b, s->field_names[i]); sb_puts(b, ": ");
+                sfmt_val(b, s->field_vals[i], 0);
+            }
+            sb_puts(b, ")");
+        } else if (o->kind == OBJ_MAP) {
+            LumenMap *m = (LumenMap *)o;
+            sb_puts(b, "{");
+            for (size_t i = 0; i < m->len; i++) {
+                if (i) sb_puts(b, ", ");
+                sfmt_val(b, m->keys[i], 0); sb_puts(b, ": "); sfmt_val(b, m->vals[i], 0);
+            }
+            sb_puts(b, "}");
+        } else if (o->kind == OBJ_CBUF) {
+            snprintf(nb, sizeof nb, "<cbuf %zu>", ((LumenCBuf *)o)->len);
+            sb_puts(b, nb);
+        } else if (o->kind == OBJ_FUNC) {
+            sb_puts(b, "<fn>");
+        }
+    }
+}
+static LumenVal sfmt_to_str(LumenVal v) {
+    SBuf b = {0};
+    sb_need(&b, 0);
+    b.p[0] = 0;
+    sfmt_val(&b, v, 1);
+    LumenVal r = lumen_str_new(b.p);
+    free(b.p);
+    return r;
+}
 
 LumenVal lumen_to_str(LumenVal v) {
     char buf[512];
@@ -884,8 +962,14 @@ LumenVal lumen_to_str(LumenVal v) {
     } else if (lumen_is_ptr(v)) {
         LumenObj *o = unbox_ptr(v);
         if (o->kind == OBJ_STR) return v;
-        if (o->kind == OBJ_CBUF) snprintf(buf, sizeof buf, "<cbuf %zu>", ((LumenCBuf *)o)->len);
-        else snprintf(buf, sizeof buf, "<obj>");
+        if (o->kind == OBJ_CBUF) {
+            snprintf(buf, sizeof buf, "<cbuf %zu>", ((LumenCBuf *)o)->len);
+        } else {
+            // list/map/struct/fn: format via the same logic as print_val so
+            // str(x) == what print(x) shows. Build into a temp file-less buffer
+            // by redirecting through sfmt_val (mirrors print_val exactly).
+            return sfmt_to_str(v);
+        }
     } else {
         buf[0] = 0;
     }
@@ -1347,6 +1431,244 @@ LumenVal lumen_os_args(void) {
     }
     return list;
 }
+
+/* net: Winsock2 TCP/UDP sockets mirroring src/net.rs. A socket is an int handle
+ * (-1 = error). recv/recvfrom return text (or nil on error); recvfrom returns a
+ * map {data, host, port}. Windows-only (matches interp). 
+ * DO NOT TOUCH IF YOU DO NOT KNOW WHAT YOU ARE DOING!!!
+ * DO NOT RENAME THE FUNCTIONS, THIS FUNCTIONS ARE NAMED LIKE THIS SPECFICALLY,
+ * FOR COLLISION WITHIN OTHER FUNCTIONS!!!
+ */
+
+LumenVal lumen_map_new(void);
+void lumen_map_set(LumenVal mv, LumenVal key, LumenVal val);
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+static int net_started = 0;
+static void net_start(void) {
+    if (!net_started) {
+        WSADATA d;
+        WSAStartup(MAKEWORD(2, 2), &d);
+        net_started = 1;
+    }
+}
+
+/* Fill a sockaddr_in for host:port. host "" = INADDR_ANY. Returns 1 on success. */
+static int net_addr(const char *host, int port, struct sockaddr_in *sa) {
+    memset(sa, 0, sizeof(*sa));
+    sa->sin_family = AF_INET;
+    sa->sin_port = htons((unsigned short)port);
+    if (!host || !host[0]) {
+        sa->sin_addr.s_addr = INADDR_ANY;
+        return 1;
+    }
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) return 0;
+    struct sockaddr_in *r = (struct sockaddr_in *)res->ai_addr;
+    sa->sin_addr = r->sin_addr;
+    freeaddrinfo(res);
+    return 1;
+}
+
+static LumenVal net_ip_string(struct in_addr a) {
+    unsigned char *o = (unsigned char *)&a.s_addr;
+    char buf[32];
+    snprintf(buf, sizeof buf, "%u.%u.%u.%u", o[0], o[1], o[2], o[3]);
+    return lumen_str_new(buf);
+}
+
+LumenVal lumen_net_listen(LumenVal host, LumenVal port) {
+    net_start();
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return lumen_from_int(-1);
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char *)&one, sizeof one);
+    struct sockaddr_in sa;
+    if (!net_addr(lumen_cstr(host), (int)lumen_to_int(port), &sa)
+        || bind(s, (struct sockaddr *)&sa, sizeof sa) == SOCKET_ERROR
+        || listen(s, 128) == SOCKET_ERROR) {
+        closesocket(s);
+        return lumen_from_int(-1);
+    }
+    return lumen_from_int((int64_t)s);
+}
+
+LumenVal lumen_net_accept(LumenVal sock) {
+    SOCKET c = accept((SOCKET)lumen_to_int(sock), NULL, NULL);
+    return lumen_from_int(c == INVALID_SOCKET ? -1 : (int64_t)c);
+}
+
+LumenVal lumen_net_connect(LumenVal host, LumenVal port) {
+    net_start();
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return lumen_from_int(-1);
+    struct sockaddr_in sa;
+    if (!net_addr(lumen_cstr(host), (int)lumen_to_int(port), &sa)
+        || connect(s, (struct sockaddr *)&sa, sizeof sa) == SOCKET_ERROR) {
+        closesocket(s);
+        return lumen_from_int(-1);
+    }
+    return lumen_from_int((int64_t)s);
+}
+
+LumenVal lumen_net_udp(LumenVal host, LumenVal port) {
+    net_start();
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return lumen_from_int(-1);
+    const char *h = lumen_cstr(host);
+    int p = (int)lumen_to_int(port);
+    struct sockaddr_in sa;
+    if (!net_addr(h, p, &sa)) { closesocket(s); return lumen_from_int(-1); }
+    if ((h[0] || p != 0) && bind(s, (struct sockaddr *)&sa, sizeof sa) == SOCKET_ERROR) {
+        closesocket(s);
+        return lumen_from_int(-1);
+    }
+    return lumen_from_int((int64_t)s);
+}
+
+LumenVal lumen_net_send(LumenVal sock, LumenVal data) {
+    const char *p = lumen_cstr(data);
+    int n = send((SOCKET)lumen_to_int(sock), p, (int)strlen(p), 0);
+    return lumen_from_int((int64_t)n);
+}
+
+LumenVal lumen_net_recv(LumenVal sock, LumenVal max) {
+    int m = (int)lumen_to_int(max);
+    if (m < 0) m = 0;
+    char *buf = xalloc((size_t)m + 1);
+    int n = recv((SOCKET)lumen_to_int(sock), buf, m, 0);
+    if (n < 0) { xfree(buf); return lumen_nil(); }
+    buf[n] = '\0';
+    LumenVal r = lumen_str_new(buf);
+    xfree(buf);
+    return r;
+}
+
+LumenVal lumen_net_sendto(LumenVal sock, LumenVal data, LumenVal host, LumenVal port) {
+    struct sockaddr_in sa;
+    if (!net_addr(lumen_cstr(host), (int)lumen_to_int(port), &sa)) return lumen_from_int(-1);
+    const char *p = lumen_cstr(data);
+    int n = sendto((SOCKET)lumen_to_int(sock), p, (int)strlen(p), 0,
+                   (struct sockaddr *)&sa, sizeof sa);
+    return lumen_from_int((int64_t)n);
+}
+
+LumenVal lumen_net_recvfrom(LumenVal sock, LumenVal max) {
+    int m = (int)lumen_to_int(max);
+    if (m < 0) m = 0;
+    char *buf = xalloc((size_t)m + 1);
+    struct sockaddr_in from;
+    int flen = sizeof from;
+    memset(&from, 0, sizeof from);
+    int n = recvfrom((SOCKET)lumen_to_int(sock), buf, m, 0, (struct sockaddr *)&from, &flen);
+    if (n < 0) { xfree(buf); return lumen_nil(); }
+    buf[n] = '\0';
+    LumenVal mp = lumen_map_new();
+    lumen_map_set(mp, lumen_str_new("data"), lumen_str_new(buf));
+    lumen_map_set(mp, lumen_str_new("host"), net_ip_string(from.sin_addr));
+    lumen_map_set(mp, lumen_str_new("port"), lumen_from_int((int64_t)ntohs(from.sin_port)));
+    xfree(buf);
+    return mp;
+}
+
+LumenVal lumen_net_close(LumenVal sock) {
+    closesocket((SOCKET)lumen_to_int(sock));
+    return lumen_nil();
+}
+
+LumenVal lumen_net_shutdown(LumenVal sock, LumenVal how) {
+    return lumen_from_int((int64_t)shutdown((SOCKET)lumen_to_int(sock), (int)lumen_to_int(how)));
+}
+
+LumenVal lumen_net_set_timeout(LumenVal sock, LumenVal ms) {
+    SOCKET s = (SOCKET)lumen_to_int(sock);
+    DWORD t = (DWORD)lumen_to_int(ms);
+    int r1 = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&t, sizeof t);
+    int r2 = setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (char *)&t, sizeof t);
+    return lumen_from_int((r1 == 0 && r2 == 0) ? 0 : -1);
+}
+
+LumenVal lumen_net_set_blocking(LumenVal sock, LumenVal blocking) {
+    u_long mode = lumen_to_int(blocking) ? 0 : 1;
+    return lumen_from_int((int64_t)ioctlsocket((SOCKET)lumen_to_int(sock), FIONBIO, &mode));
+}
+
+LumenVal lumen_net_set_opt(LumenVal sock, LumenVal name, LumenVal val) {
+    SOCKET s = (SOCKET)lumen_to_int(sock);
+    const char *n = lumen_cstr(name);
+    int v = (int)lumen_to_int(val);
+    int level = SOL_SOCKET, opt = -1;
+    if (!strcmp(n, "reuseaddr")) opt = SO_REUSEADDR;
+    else if (!strcmp(n, "keepalive")) opt = SO_KEEPALIVE;
+    else if (!strcmp(n, "broadcast")) opt = SO_BROADCAST;
+    else if (!strcmp(n, "sndbuf")) opt = SO_SNDBUF;
+    else if (!strcmp(n, "rcvbuf")) opt = SO_RCVBUF;
+    else if (!strcmp(n, "nodelay")) { level = IPPROTO_TCP; opt = TCP_NODELAY; }
+    else return lumen_from_int(-1);
+    return lumen_from_int((int64_t)setsockopt(s, level, opt, (char *)&v, sizeof v));
+}
+
+LumenVal lumen_net_poll(LumenVal sock, LumenVal ms) {
+    SOCKET s = (SOCKET)lumen_to_int(sock);
+    int64_t t = lumen_to_int(ms);
+    fd_set rd, wr;
+    FD_ZERO(&rd); FD_ZERO(&wr);
+    FD_SET(s, &rd); FD_SET(s, &wr);
+    struct timeval tv;
+    tv.tv_sec = (long)(t / 1000);
+    tv.tv_usec = (long)((t % 1000) * 1000);
+    int r = select(0, &rd, &wr, NULL, t < 0 ? NULL : &tv);
+    if (r < 0) return lumen_from_int(-1);
+    int64_t mask = 0;
+    if (FD_ISSET(s, &rd)) mask |= 1;
+    if (FD_ISSET(s, &wr)) mask |= 2;
+    return lumen_from_int(mask);
+}
+
+LumenVal lumen_net_resolve(LumenVal host) {
+    net_start();
+    struct sockaddr_in sa;
+    if (!net_addr(lumen_cstr(host), 0, &sa) || sa.sin_addr.s_addr == 0) return lumen_nil();
+    return net_ip_string(sa.sin_addr);
+}
+
+LumenVal lumen_net_local_port(LumenVal sock) {
+    struct sockaddr_in sa;
+    int len = sizeof sa;
+    if (getsockname((SOCKET)lumen_to_int(sock), (struct sockaddr *)&sa, &len) == SOCKET_ERROR)
+        return lumen_from_int(-1);
+    return lumen_from_int((int64_t)ntohs(sa.sin_port));
+}
+
+LumenVal lumen_net_errno(void) { return lumen_from_int((int64_t)WSAGetLastError()); }
+#else
+static LumenVal net_unsupported(void) {
+    lumen_raise(lumen_str_new("net: only supported on Windows"));
+    return lumen_nil();
+}
+LumenVal lumen_net_listen(LumenVal a, LumenVal b) { (void)a; (void)b; return net_unsupported(); }
+LumenVal lumen_net_accept(LumenVal a) { (void)a; return net_unsupported(); }
+LumenVal lumen_net_connect(LumenVal a, LumenVal b) { (void)a; (void)b; return net_unsupported(); }
+LumenVal lumen_net_udp(LumenVal a, LumenVal b) { (void)a; (void)b; return net_unsupported(); }
+LumenVal lumen_net_send(LumenVal a, LumenVal b) { (void)a; (void)b; return net_unsupported(); }
+LumenVal lumen_net_recv(LumenVal a, LumenVal b) { (void)a; (void)b; return net_unsupported(); }
+LumenVal lumen_net_sendto(LumenVal a, LumenVal b, LumenVal c, LumenVal d) { (void)a; (void)b; (void)c; (void)d; return net_unsupported(); }
+LumenVal lumen_net_recvfrom(LumenVal a, LumenVal b) { (void)a; (void)b; return net_unsupported(); }
+LumenVal lumen_net_close(LumenVal a) { (void)a; return net_unsupported(); }
+LumenVal lumen_net_shutdown(LumenVal a, LumenVal b) { (void)a; (void)b; return net_unsupported(); }
+LumenVal lumen_net_set_timeout(LumenVal a, LumenVal b) { (void)a; (void)b; return net_unsupported(); }
+LumenVal lumen_net_set_blocking(LumenVal a, LumenVal b) { (void)a; (void)b; return net_unsupported(); }
+LumenVal lumen_net_set_opt(LumenVal a, LumenVal b, LumenVal c) { (void)a; (void)b; (void)c; return net_unsupported(); }
+LumenVal lumen_net_poll(LumenVal a, LumenVal b) { (void)a; (void)b; return net_unsupported(); }
+LumenVal lumen_net_resolve(LumenVal a) { (void)a; return net_unsupported(); }
+LumenVal lumen_net_local_port(LumenVal a) { (void)a; return net_unsupported(); }
+LumenVal lumen_net_errno(void) { return net_unsupported(); }
+#endif
 
 static uint64_t lumen_rng_state = 0x9E3779B97F4A7C15ull;
 static uint64_t lumen_splitmix64(void) {

@@ -50,6 +50,29 @@ fn main() {
             });
             return run_source(code, std::path::Path::new("."));
         }
+
+        // Package manager + venv + self-update. These have their own arg shapes
+        // (or none), so handle them before the "needs a file" path below.
+        "install" => {
+            let pkgs: Vec<String> = args[2..].to_vec();
+            return match lumenc::pkg::install(&pkgs) {
+                Ok(()) => {}
+                Err(e) => fatal(&format!("install error: {e}")),
+            };
+        }
+        "venv" => {
+            let dir = args.get(2).map(String::as_str).unwrap_or("venv");
+            return match lumenc::pkg::venv(dir) {
+                Ok(()) => {}
+                Err(e) => fatal(&format!("venv error: {e}")),
+            };
+        }
+        "update" => {
+            return match lumenc::pkg::update() {
+                Ok(()) => {}
+                Err(e) => fatal(&format!("update error: {e}")),
+            };
+        }
         _ => {}
     }
 
@@ -201,6 +224,7 @@ fn build(prog: &ast::Program, file: &str, src: &str, args: &[String]) {
         &asm_path,
         &rt_path,
         "-lm",
+        "-lws2_32", // net module (Winsock2); --gc-sections drops it if unused
     ]);
     if let Some(obj) = &icon_obj {
         cmd.arg(obj);
@@ -492,6 +516,9 @@ fn print_usage() {
     eprintln!("  lumen init                           scaffold a project in the cwd");
     eprintln!("  lumen check  <file.lm>               parse + compile-check, no output");
     eprintln!("  lumen emit   <file.lm>               print generated x86-64 assembly");
+    eprintln!("  lumen install [pkg|url ...]          install packages into lumen_modules/ (none = from lumen.pkg)");
+    eprintln!("  lumen venv   <dir>                   create an isolated package environment");
+    eprintln!("  lumen update                         download + install a newer compiler (LUMEN_UPDATE_URL=owner/repo)");
     eprintln!("  lumen repl                           interactive read-eval-print loop");
     eprintln!("  lumen doctor                         check the native-build toolchain (gcc, windres)");
     eprintln!("  lumen tokens <file.lm>               dump tokens (debug)");

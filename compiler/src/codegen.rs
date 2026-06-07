@@ -2777,7 +2777,7 @@ impl Codegen {
                     out.push_str("    mov rcx, rax\n    call lumen_print\n    call lumen_nil\n");
                     return Ok(());
                 }
-                // N args: each value, space-separated, then one newline s-
+                // N args: each value, space-separated, then one newline 
                 // matches the interpreter's parts.join(" ") + newline.
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {

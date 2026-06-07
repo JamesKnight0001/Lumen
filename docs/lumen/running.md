@@ -89,6 +89,9 @@ lumen new    <name>                scaffold a new project directory
 lumen init                         scaffold a project in the current directory
 lumen check  file.lm               parse + compile-check only, produce nothing
 lumen emit   file.lm               print the generated x86-64 assembly
+lumen install [pkg|url ...]        install packages into lumen_modules/ (none = from lumen.pkg)
+lumen venv   <dir>                 create an isolated package environment
+lumen update                       download + install a newer compiler (LUMEN_UPDATE_URL=owner/repo)
 lumen doctor                       check the native-build toolchain (gcc, windres)
 lumen tokens file.lm               dump the token stream (for debugging)
 lumen ast    file.lm               dump the parsed syntax tree (for debugging)

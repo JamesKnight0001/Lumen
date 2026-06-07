@@ -1518,6 +1518,25 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
             _ => Err("callback: argument must be a function".into()),
         },
     },
+    // net: Winsock2 TCP/UDP sockets. A socket is an int handle (-1 = error).
+    // Native side: lumen_net_* in lumen_rt.c. Windows-only.
+    ModuleFn { module: "net", name: "listen", arity: 2, symbol: "lumen_net_listen", eval: |a| crate::net::listen(a) },
+    ModuleFn { module: "net", name: "accept", arity: 1, symbol: "lumen_net_accept", eval: |a| crate::net::accept(a) },
+    ModuleFn { module: "net", name: "connect", arity: 2, symbol: "lumen_net_connect", eval: |a| crate::net::connect(a) },
+    ModuleFn { module: "net", name: "udp", arity: 2, symbol: "lumen_net_udp", eval: |a| crate::net::udp(a) },
+    ModuleFn { module: "net", name: "send", arity: 2, symbol: "lumen_net_send", eval: |a| crate::net::send(a) },
+    ModuleFn { module: "net", name: "recv", arity: 2, symbol: "lumen_net_recv", eval: |a| crate::net::recv(a) },
+    ModuleFn { module: "net", name: "sendto", arity: 4, symbol: "lumen_net_sendto", eval: |a| crate::net::sendto(a) },
+    ModuleFn { module: "net", name: "recvfrom", arity: 2, symbol: "lumen_net_recvfrom", eval: |a| crate::net::recvfrom(a) },
+    ModuleFn { module: "net", name: "close", arity: 1, symbol: "lumen_net_close", eval: |a| crate::net::close(a) },
+    ModuleFn { module: "net", name: "shutdown", arity: 2, symbol: "lumen_net_shutdown", eval: |a| crate::net::shutdown(a) },
+    ModuleFn { module: "net", name: "set_timeout", arity: 2, symbol: "lumen_net_set_timeout", eval: |a| crate::net::set_timeout(a) },
+    ModuleFn { module: "net", name: "set_blocking", arity: 2, symbol: "lumen_net_set_blocking", eval: |a| crate::net::set_blocking(a) },
+    ModuleFn { module: "net", name: "set_opt", arity: 3, symbol: "lumen_net_set_opt", eval: |a| crate::net::set_opt(a) },
+    ModuleFn { module: "net", name: "poll", arity: 2, symbol: "lumen_net_poll", eval: |a| crate::net::poll(a) },
+    ModuleFn { module: "net", name: "resolve", arity: 1, symbol: "lumen_net_resolve", eval: |a| crate::net::resolve(a) },
+    ModuleFn { module: "net", name: "local_port", arity: 1, symbol: "lumen_net_local_port", eval: |a| crate::net::local_port(a) },
+    ModuleFn { module: "net", name: "errno", arity: 0, symbol: "lumen_net_errno", eval: |a| crate::net::errno(a) },
 ];
 
 pub fn is_module(name: &str) -> bool {
@@ -1587,6 +1606,19 @@ mod tests {
             "exit", "args",
         ] {
             assert!(lookup("os", name).is_some(), "os.{name} not registered");
+        }
+    }
+
+    #[test]
+    fn net_fns_ok() {
+        for (name, arity) in [
+            ("listen", 2u8), ("accept", 1), ("connect", 2), ("udp", 2),
+            ("send", 2), ("recv", 2), ("sendto", 4), ("recvfrom", 2),
+            ("close", 1), ("shutdown", 2), ("set_timeout", 2), ("set_blocking", 2),
+            ("set_opt", 3), ("poll", 2), ("resolve", 1), ("local_port", 1), ("errno", 0),
+        ] {
+            let f = lookup("net", name).unwrap_or_else(|| panic!("net.{name} missing"));
+            assert_eq!(f.arity, arity, "net.{name} arity");
         }
     }
 

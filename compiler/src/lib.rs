@@ -12,13 +12,16 @@ pub mod codegen;
 pub mod desugar;
 #[cfg(windows)]
 pub mod ffi;
+pub mod http;
 pub mod imports;
 pub mod interp;
 pub mod lexer;
 pub mod lift;
 pub mod mir;
+pub mod net;
 pub mod opt;
 pub mod parser;
+pub mod pkg;
 pub mod toolchain;
 pub mod types;
 

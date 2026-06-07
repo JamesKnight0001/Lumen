@@ -7,3 +7,4 @@ lumen_demo_dir/
 # local-only: dev tooling, not part of the published repo
 bench/
 tests/
+CHANGELOG.md
