@@ -865,6 +865,12 @@ static void print_val(LumenVal v, int top) {
 
 void lumen_print(LumenVal v) { print_val(v, 1); printf("\n"); }
 
+/* Multi-arg print(): each value at top-level, space-separated, one trailing
+   newline s- matching the interpreter's parts.join(" ") + newline. */
+void lumen_print_part(LumenVal v) { print_val(v, 1); }
+void lumen_print_space(void) { printf(" "); }
+void lumen_print_nl(void) { printf("\n"); }
+
 LumenVal lumen_to_str(LumenVal v) {
     char buf[512];
     if (lumen_is_double(v)) {

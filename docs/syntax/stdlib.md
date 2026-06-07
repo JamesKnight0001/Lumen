@@ -10,7 +10,7 @@ interpreter and the compiled binary.
 
 | Function | Does | Example → result |
 |----------|------|------------------|
-| `print(v)` | print a value and a newline | `print(42)` → `42` |
+| `print(...)` | print values (space-separated) and a newline | `print(1, "x")` → `1 x` |
 | `len(x)` | length of a string, list, or map | `len([1,2,3])` → `3` |
 | `str(v)` | value → its string form | `str(3.5)` → `"3.5"` |
 | `int(v)` | float/string → integer (truncating) | `int(3.9)` → `3` |

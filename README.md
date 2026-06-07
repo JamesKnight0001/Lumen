@@ -25,7 +25,7 @@ fn main():
 ```
 
 ## Version
-Compiler: V0.70.0
+Compiler: V0.71.0
 
 # Install using Installer:
 [Lumen installer](https://github.com/JamesKnight0001/Lumen_installer)

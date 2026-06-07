@@ -229,7 +229,7 @@ impl<'a> Lexer<'a> {
 
         while self.at_line_start && self.paren_depth == 0 {
             let before = self.at_line_start;
-            if let Some(t) = self.handle_line_start()? {
+            if let Some(t) = self.handle_line()? {
                 return Ok(t);
             }
 
@@ -247,18 +247,8 @@ impl<'a> Lexer<'a> {
             if c == b' ' || c == b'\t' || c == b'\r' {
                 self.bump();
             } else if c == b'#' {
-
                 if self.peek2() == b'[' {
-                    self.bump();
-                    self.bump();
-                    while self.pos < self.src.len() {
-                        if self.peek() == b']' && self.peek2() == b'#' {
-                            self.bump();
-                            self.bump();
-                            break;
-                        }
-                        self.bump();
-                    }
+                    self.skip_block_comment();
                 } else {
                     while self.pos < self.src.len() && self.peek() != b'\n' {
                         self.bump();
@@ -441,12 +431,24 @@ impl<'a> Lexer<'a> {
         Ok(self.mk(tok))
     }
 
-    // Called at the start of each logical line. Measures leading whitespace and
-    // compares it to the indentation stack: deeper => emit one Indent; shallower
-    // => pop and emit a Dedent per level (extras queued in `pending`); same depth
-    // => nothing. Blank and comment-only lines are skipped without layout tokens.
-    fn handle_line_start(&mut self) -> Result<Option<Token>, String> {
+    // Skip a `#[ ... ]#` block comment, delimiters included, across any number
+    // of lines. Cursor must be on the opening `#`; unterminated runs to EOF.
+    fn skip_block_comment(&mut self) {
+        self.bump(); // #
+        self.bump(); // [
+        while self.pos < self.src.len() {
+            if self.peek() == b']' && self.peek2() == b'#' {
+                self.bump();
+                self.bump();
+                break;
+            }
+            self.bump();
+        }
+    }
 
+    // At line start: measure indent width, skip blank/comment-only lines, else
+    // emit the layout token (Indent/Dedent/none) for this line.
+    fn handle_line(&mut self) -> Result<Option<Token>, String> {
         let mut width = 0usize;
         loop {
             match self.peek() {
@@ -463,6 +465,28 @@ impl<'a> Lexer<'a> {
         }
 
         let c = self.peek();
+        // A block comment can span lines, so `#[` consumes through its `]#` even
+        // across newlines, unlike a `#` line comment.
+        if c == b'#' && self.peek2() == b'[' {
+            self.skip_block_comment();
+            // Skip trailing space; if the line is now empty it carries no layout,
+            // otherwise emit indent and let the caller tokenize the rest.
+            while self.peek() == b' ' || self.peek() == b'\t' || self.peek() == b'\r' {
+                self.bump();
+            }
+            let after = self.peek();
+            if after == b'\n' {
+                self.bump();
+                self.at_line_start = true;
+                return Ok(None);
+            }
+            if after == 0 {
+                self.at_line_start = true;
+                return Ok(None);
+            }
+            self.at_line_start = false;
+            return self.emit_indent(width);
+        }
         if c == b'\n' || c == b'#' || c == 0 {
             if c == b'\n' {
                 self.bump();
@@ -480,12 +504,17 @@ impl<'a> Lexer<'a> {
         }
 
         self.at_line_start = false;
+        self.emit_indent(width)
+    }
+
+    // Emit the layout token for `width` vs the indent stack: Indent, Dedent(s),
+    // or none. Shared so handle_line can reuse it after a leading block comment.
+    fn emit_indent(&mut self, width: usize) -> Result<Option<Token>, String> {
         let cur = *self.indents.last().unwrap();
         if width > cur {
             self.indents.push(width);
             return Ok(Some(self.mk(Tok::Indent)));
         } else if width < cur {
-
             let mut emitted = None;
             while width < *self.indents.last().unwrap() {
                 self.indents.pop();
@@ -579,5 +608,54 @@ impl<'a> Lexer<'a> {
             }
         }
         Ok(self.mk(if fstring { Tok::FStr(s) } else { Tok::Str(s) }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn toks(src: &str) -> Vec<Tok> {
+        Lexer::new(src)
+            .tokenize()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.tok)
+            .collect()
+    }
+
+    #[test]
+    fn single_comment() {
+        let t = toks("#[ hi ]#\nlet x = 1\n");
+        assert!(matches!(t[0], Tok::Let));
+    }
+
+    #[test]
+    fn multiline_comment() {
+        // Regression: a multi-line block comment must be fully skipped (incl.
+        // continuation indent) and not leak Newline/Indent tokens.
+        let t = toks("#[ line one\n   line two\n   line three ]#\nlet x = 1\n");
+        assert!(matches!(t[0], Tok::Let), "got {:?}", &t[..t.len().min(4)]);
+    }
+
+    #[test]
+    fn block_comment() {
+        let src = "fn f():\n    #[ a\n    b ]#\n    return 1\n";
+        let t = toks(src);
+        assert!(t.iter().any(|x| matches!(x, Tok::Return)));
+        assert!(t.iter().any(|x| matches!(x, Tok::Indent)));
+    }
+
+    #[test]
+    fn block_comment_code() {
+        // Code after `]#` on the same line survives.
+        let t = toks("#[ c ]# let x = 1\n");
+        assert!(matches!(t[0], Tok::Let));
+    }
+
+    #[test]
+    fn line_comment_ok() {
+        let t = toks("# just a line\nlet y = 2\n");
+        assert!(matches!(t[0], Tok::Let));
     }
 }

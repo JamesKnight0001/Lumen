@@ -41,6 +41,15 @@ let radius = 5        # in metres
 let area = 3.14159 * radius * radius
 ```
 
+For a comment that spans several lines, wrap it in `#[ ... ]#`. It can run
+across as many lines as you like, and also works inline in the middle of a line.
+
+```lumen
+#[ This is a block comment.
+   It can span multiple lines without a `#` on each one. ]#
+let x = 1 #[ inline note ]# + 2
+```
+
 ## `main` is your entry point
 
 Define a function called `main` and Lumen runs it for you, automatically. You

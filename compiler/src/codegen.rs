@@ -2767,11 +2767,26 @@ impl Codegen {
 
         match name.as_str() {
             "print" => {
-                if args.len() != 1 {
-                    return Err("native print() takes one arg".into());
+                if args.is_empty() {
+                    // print() -> blank line.
+                    out.push_str("    call lumen_print_nl\n    call lumen_nil\n");
+                    return Ok(());
                 }
-                self.gen_expr(&args[0], ctx, out)?;
-                out.push_str("    mov rcx, rax\n    call lumen_print\n    call lumen_nil\n");
+                if args.len() == 1 {
+                    self.gen_expr(&args[0], ctx, out)?;
+                    out.push_str("    mov rcx, rax\n    call lumen_print\n    call lumen_nil\n");
+                    return Ok(());
+                }
+                // N args: each value, space-separated, then one newline s-
+                // matches the interpreter's parts.join(" ") + newline.
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str("    call lumen_print_space\n");
+                    }
+                    self.gen_expr(a, ctx, out)?;
+                    out.push_str("    mov rcx, rax\n    call lumen_print_part\n");
+                }
+                out.push_str("    call lumen_print_nl\n    call lumen_nil\n");
                 return Ok(());
             }
             "len" => {

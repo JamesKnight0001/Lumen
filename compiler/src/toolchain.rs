@@ -15,7 +15,8 @@ const EXE: &str = ".exe";
 #[cfg(not(windows))]
 const EXE: &str = "";
 
-fn candidate_bins() -> Vec<PathBuf> {
+// Standard MinGW/MSYS2 install roots to scan, in priority order.
+fn bins() -> Vec<PathBuf> {
     let mut v = Vec::new();
     let mut push = |p: &str| v.push(PathBuf::from(p));
 
@@ -39,50 +40,46 @@ fn candidate_bins() -> Vec<PathBuf> {
     v
 }
 
-fn on_path(name: &str) -> Option<PathBuf> {
+fn in_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
-        let cand = dir.join(format!("{name}{EXE}"));
-        if cand.is_file() {
-            return Some(cand);
+        let p = dir.join(format!("{name}{EXE}"));
+        if p.is_file() {
+            return Some(p);
         }
     }
     None
 }
 
-/// Locate a GNU tool by name (e.g. "gcc", "windres").
-pub fn find_tool(name: &str, override_env: Option<&str>) -> Option<Tool> {
-    if let Some(var) = override_env {
+/// Locate a GNU tool by name (e.g. "gcc", "windres"): env override, then PATH,
+/// then a scan of the known install roots.
+pub fn find_tool(name: &str, env: Option<&str>) -> Option<Tool> {
+    if let Some(var) = env {
         if let Ok(val) = std::env::var(var) {
-            let val = val.trim();
-            if !val.is_empty() {
-                let p = PathBuf::from(val);
-                if p.is_file() {
-                    let bin_dir = p.parent().map(PathBuf::from);
-                    return Some(Tool {
-                        program: p,
-                        bin_dir,
-                        source: "override env",
-                    });
-                }
+            let p = PathBuf::from(val.trim());
+            if p.is_file() {
+                return Some(Tool {
+                    bin_dir: p.parent().map(PathBuf::from),
+                    program: p,
+                    source: "override env",
+                });
             }
         }
     }
 
-    if let Some(p) = on_path(name) {
-        let bin_dir = p.parent().map(PathBuf::from);
+    if let Some(p) = in_path(name) {
         return Some(Tool {
+            bin_dir: p.parent().map(PathBuf::from),
             program: p,
-            bin_dir,
             source: "PATH",
         });
     }
 
-    for dir in candidate_bins() {
-        let cand = dir.join(format!("{name}{EXE}"));
-        if cand.is_file() {
+    for dir in bins() {
+        let p = dir.join(format!("{name}{EXE}"));
+        if p.is_file() {
             return Some(Tool {
-                program: cand,
+                program: p,
                 bin_dir: Some(dir),
                 source: "auto-detected",
             });
@@ -92,15 +89,12 @@ pub fn find_tool(name: &str, override_env: Option<&str>) -> Option<Tool> {
     None
 }
 
-/// Convenience: locate the C compiler, honoring `LUMEN_CC` then `CC`.
+/// Locate the C compiler, honoring `LUMEN_CC` then `CC`.
 pub fn find_cc() -> Option<Tool> {
-    if let Some(t) = find_tool("gcc", Some("LUMEN_CC")) {
-        return Some(t);
-    }
-    find_tool("gcc", Some("CC"))
+    find_tool("gcc", Some("LUMEN_CC")).or_else(|| find_tool("gcc", Some("CC")))
 }
 
-/// A human-readable, copy-pasteable hint for when no toolchain is found.
+/// Copy-pasteable hint shown when no toolchain is found.
 pub fn install_hint() -> &'static str {
     if cfg!(windows) {
         "no C toolchain found. Lumen links native binaries with gcc (MinGW-w64).\n\
@@ -120,13 +114,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn override_env() {
-        let me = PathBuf::from(file!());
-        // file!() is relative to the crate root during tests.
-        let abs = std::env::current_dir().unwrap().join(&me);
+    fn env_override() {
+        // Point the override at this source file (always exists) and confirm the
+        // override branch wins.
+        let abs = std::env::current_dir().unwrap().join(file!());
         if abs.is_file() {
             std::env::set_var("LUMEN_TEST_CC", abs.to_str().unwrap());
-            let t = find_tool("gcc", Some("LUMEN_TEST_CC")).expect("override should resolve");
+            let t = find_tool("gcc", Some("LUMEN_TEST_CC")).expect("override resolves");
             assert_eq!(t.source, "override env");
             assert_eq!(t.program, abs);
             std::env::remove_var("LUMEN_TEST_CC");
@@ -135,13 +129,13 @@ mod tests {
 
     #[test]
     fn missing_override() {
-        std::env::remove_var("LUMEN_DEFINITELY_UNSET_CC");
-        // Should not panic; result depends on the host, we only assert it runs.
-        let _ = find_tool("gcc", Some("LUMEN_DEFINITELY_UNSET_CC"));
+        std::env::remove_var("LUMEN_UNSET_CC");
+        // Must not panic; result is host-dependent.
+        let _ = find_tool("gcc", Some("LUMEN_UNSET_CC"));
     }
 
     #[test]
-    fn install_hint() {
+    fn hint_nonempty() {
         assert!(!install_hint().is_empty());
     }
 }

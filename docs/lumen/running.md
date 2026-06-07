@@ -52,7 +52,7 @@ lumen doctor
 ```
 
 ```
-Lumen 0.69.0 - toolchain check
+Lumen 0.71.0 - toolchain check
 
   gcc      found    C:\msys64\mingw64\bin\gcc.exe  (via auto-detected)
   windres  found    C:\msys64\mingw64\bin\windres.exe  (via auto-detected)  [optional, for --icon]

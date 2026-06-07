@@ -217,6 +217,17 @@ impl Lifter {
                 }
             }
             Expr::Lambda { body, .. } => self.lift_block(body, celled),
+            Expr::ListComp {
+                elem, iter, cond, ..
+            } => {
+                // A lambda can sit in a comprehension's elem/cond s- notably the
+                // desugared `xs.map(f)`/`xs.filter(f)`. Recurse so it gets lifted.
+                self.lift_expr(elem, celled);
+                self.lift_expr(iter, celled);
+                if let Some(c) = cond {
+                    self.lift_expr(c, celled);
+                }
+            }
             _ => {}
         }
 

@@ -151,23 +151,14 @@ fn build(prog: &ast::Program, file: &str, src: &str, args: &[String]) {
 
     let icon_obj = icon.as_deref().and_then(|p| make_icon(p, stem));
 
-    // Locate the GNU toolchain ourselves rather than relying on PATH, so
+    // Find gcc ourselves (env override / PATH / known roots) so builds work from
+    // a fresh shell with no MinGW on PATH. -ffunction-sections + --gc-sections
+    // drop unused code; extern blocks add their own -l flags below.
     let cc = lumenc::toolchain::find_cc()
         .unwrap_or_else(|| fatal(&format!("error: {}", lumenc::toolchain::install_hint())));
     let mut cmd = Command::new(&cc.program);
-    // Put the toolchain's own bin dir on the child's PATH so gcc can find its
-    // sibling `as`/`ld`/`collect2` even when the parent shell never had it.
-    if let Some(bin) = &cc.bin_dir {
-        if let Some(old) = std::env::var_os("PATH") {
-            let mut paths = vec![bin.clone()];
-            paths.extend(std::env::split_paths(&old));
-            if let Ok(joined) = std::env::join_paths(paths) {
-                cmd.env("PATH", joined);
-            }
-        } else {
-            cmd.env("PATH", bin);
-        }
-    }
+    // Put gcc's own bin on the child PATH so it finds its as/ld.
+    prepend_path(&mut cmd, cc.bin_dir.as_deref());
     cmd.args([
         "-O2",
         "-s",
@@ -198,6 +189,19 @@ fn build(prog: &ast::Program, file: &str, src: &str, args: &[String]) {
         Err(e) => fatal(&format!(
             "could not run gcc (is the GNU toolchain installed?): {e}"
         )),
+    }
+}
+
+// Prepend `dir` to the child command's PATH so a located tool finds its
+// siblings (gcc -> as/ld) even when the parent shell's PATH lacks them.
+fn prepend_path(cmd: &mut Command, dir: Option<&Path>) {
+    let Some(dir) = dir else { return };
+    let mut paths = vec![dir.to_path_buf()];
+    if let Some(old) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&old));
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        cmd.env("PATH", joined);
     }
 }
 
@@ -239,23 +243,14 @@ fn make_icon(icon_path: &str, stem: &str) -> Option<String> {
         eprintln!("warning: could not write resource script; building without an icon");
         return None;
     }
-    // windres lives alongside gcc in the same toolchain; locate it the same way.
-    let windres = lumenc::toolchain::find_tool("windres", Some("LUMEN_WINDRES"));
-    let Some(windres) = windres else {
+    // windres ships with gcc; find it the same way.
+    let Some(windres) = lumenc::toolchain::find_tool("windres", Some("LUMEN_WINDRES")) else {
         eprintln!("warning: windres not found; building without an icon");
         let _ = std::fs::remove_file(&rc_path);
         return None;
     };
     let mut wcmd = Command::new(&windres.program);
-    if let Some(bin) = &windres.bin_dir {
-        if let Some(old) = std::env::var_os("PATH") {
-            let mut paths = vec![bin.clone()];
-            paths.extend(std::env::split_paths(&old));
-            if let Ok(joined) = std::env::join_paths(paths) {
-                wcmd.env("PATH", joined);
-            }
-        }
-    }
+    prepend_path(&mut wcmd, windres.bin_dir.as_deref());
     let status = wcmd
         .args([
             "--input",

@@ -78,9 +78,12 @@ fn main():
 ```
 
 Pair closures with [`list.map` and `list.filter`](lists.md) for compact
-transformations. One practical note: bind the anonymous function to a name first
-(`let sq = fn(x): x * x`) and pass that name, rather than dropping the `fn(...)`
-literal straight into the method-call parentheses.
+transformations s- the `fn(...)` literal can go straight into the method call:
+
+```lumen
+let evens = [1, 2, 3, 4, 5, 6].filter(fn(v): v % 2 == 0)   # [2, 4, 6]
+let squares = [1, 2, 3, 4].map(fn(v): v * v)               # [1, 4, 9, 16]
+```
 
 ## A small FFI footnote
 

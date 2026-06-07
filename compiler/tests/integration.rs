@@ -47,6 +47,28 @@ fn main():
 }
 
 #[test]
+fn print_multi_arg() {
+    // print(a, b, ...) is space-joined in both backends.
+    assert!(run_ok("fn main():\n    print(1, 2, 3)\n"));
+    assert!(run_ok("fn main():\n    print(\"a\", \"b\")\n"));
+    assert!(run_ok("fn main():\n    print()\n"));
+}
+
+#[test]
+fn inline_lambda() {
+    // Regression: inline lambda to .map/.filter must be lifted (lift.rs ListComp).
+    assert!(run_ok(
+        "fn main():\n    let xs = [1,2,3,4,5,6]\n    print(xs.filter(fn(v): v % 2 == 0))\n"
+    ));
+    assert!(run_ok(
+        "fn main():\n    let xs = [1,2,3,4]\n    print(xs.map(fn(v): v * 10))\n"
+    ));
+    assert!(run_ok(
+        "fn main():\n    let xs = [1,2,3,4,5]\n    print(xs.filter(fn(v): v > 2).map(fn(v): v * v))\n"
+    ));
+}
+
+#[test]
 fn struct_and_methods() {
     let src = "\
 struct P:
