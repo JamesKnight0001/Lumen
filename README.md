@@ -1,4 +1,4 @@
-# Lumen
+ # Lumen - BETA V0.74.0
 
 A small, fast language with Python-like syntax and a Lua-sized core.
 
