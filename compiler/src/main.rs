@@ -73,6 +73,37 @@ fn main() {
         return;
     }
 
+    // `decls`: emit declaration name spans as TSV for tooling (Lumenlance).
+    // Format per line: kind<TAB>name<TAB>line<TAB>col<TAB>end_col<TAB>parent
+    // Runs pre-compile so it works on a single file without resolving imports.
+    if cmd == "decls" {
+        match lumenc::parse_program_spanned(&src) {
+            Ok((_, decls)) => {
+                for d in &decls {
+                    let kind = match d.kind {
+                        ast::DeclKind::Fn => "fn",
+                        ast::DeclKind::Method => "method",
+                        ast::DeclKind::Struct => "struct",
+                        ast::DeclKind::Field => "field",
+                        ast::DeclKind::Param => "param",
+                        ast::DeclKind::Import => "import",
+                    };
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}\t{}",
+                        kind,
+                        d.name,
+                        d.line,
+                        d.col,
+                        d.end_col,
+                        d.parent.as_deref().unwrap_or("")
+                    );
+                }
+            }
+            Err(e) => fatal_compile(e, &src),
+        }
+        return;
+    }
+
     let base_dir = entry_dir(file);
     // One compile front end for every command below; LUMEN_NO_OPT=1 disables the
     // optimizer (handy for debugging or comparing backends).
@@ -418,7 +449,7 @@ fn scaffold(dir: &std::path::Path, name: &str) {
         }
     }
     let main_lm = format!(
-        "# {name} - a Lumen project.\n#\n#   lumen run   main.lm        # run via the interpreter\n#   lumen build main.lm -o {name}.exe && ./{name}.exe   # native binary\n\nfn greet(who):\n    return f\"Hello, {{who}}!\"\n\nfn main():\n    print(greet(\"{name}\"))\n"
+        "#[\n {name} - a Lumen project.\n\nlumen run main.lm <- run via the interpreter\nlumen build main.lm -o {name}.exe && ./{name}.exe <- native binary\n]#\n\nfn greet(who):\n    return f\"Hello, {{who}}!\"\n\nfn main():\n    print(greet(\"{name}\"))\n"
     );
     let gitignore = "*.exe\n*.s\n*_rt.c\n";
     let readme = format!(
@@ -465,6 +496,7 @@ fn print_usage() {
     eprintln!("  lumen doctor                         check the native-build toolchain (gcc, windres)");
     eprintln!("  lumen tokens <file.lm>               dump tokens (debug)");
     eprintln!("  lumen ast    <file.lm>               dump the AST (debug)");
+    eprintln!("  lumen decls  <file.lm>               dump declaration name spans as TSV (tooling)");
     eprintln!("  lumen version                        print the version");
 }
 

@@ -225,6 +225,31 @@ pub enum BinOp {
 
 pub type Program = Vec<Item>;
 
+// Kind of a named declaration, for span side-tables (tooling only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclKind {
+    Fn,
+    Method,
+    Struct,
+    Field,
+    Param,
+    Import,
+}
+
+// Source span of a declaration NAME. Built only by `parse_program_spanned`
+// (used by tooling/LSP); the compile path never produces these, so codegen
+// and runtime are unaffected. Positions are 1-based; end col is exclusive.
+#[derive(Debug, Clone)]
+pub struct DeclSpan {
+    pub name: String,
+    pub kind: DeclKind,
+    pub line: usize,
+    pub col: usize,
+    pub end_col: usize,
+    // Container decl name (struct for fields/methods, fn for params), if any.
+    pub parent: Option<String>,
+}
+
 pub const LUMEN_INT_BITS: u32 = 48;
 // Sign-extend an i64 into Lumen's 48-bit integer range: mask to 48 bits, then
 // shift up and arithmetic-shift back down to recover the sign. Every int op

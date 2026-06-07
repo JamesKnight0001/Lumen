@@ -9,13 +9,61 @@ use crate::lexer::{Tok, Token};
 pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    // Span side-table, populated only in spanned mode (tooling). None on the
+    // normal compile path, so that path is byte-for-byte unchanged.
+    decls: Option<Vec<DeclSpan>>,
+    // Name of the decl currently being parsed (struct/impl target or fn), so
+    // fields/params/methods can record their parent. Spanned mode only.
+    cur_parent: Option<String>,
 }
 
 type PResult<T> = Result<T, String>;
 
 impl Parser {
     pub fn new(toks: Vec<Token>) -> Self {
-        Parser { toks, pos: 0 }
+        Parser {
+            toks,
+            pos: 0,
+            decls: None,
+            cur_parent: None,
+        }
+    }
+
+    // Enable span collection (tooling). Returns collected decls after parsing.
+    pub fn new_spanned(toks: Vec<Token>) -> Self {
+        Parser {
+            toks,
+            pos: 0,
+            decls: Some(Vec::new()),
+            cur_parent: None,
+        }
+    }
+
+    pub fn take_decls(&mut self) -> Vec<DeclSpan> {
+        self.decls.take().unwrap_or_default()
+    }
+
+    // Record a decl span if collecting. `tok_idx` is the name token's index.
+    // The lexer stamps `col` AFTER scanning a token, so token.col is the
+    // exclusive END column; the start is end - byte length. Idents are ASCII,
+    // so byte length == char count here.
+    fn rec(&mut self, name: &str, kind: DeclKind, tok_idx: usize, parent: Option<String>) {
+        if self.decls.is_none() {
+            return;
+        }
+        let t = &self.toks[tok_idx];
+        let end = t.col;
+        let start = end.saturating_sub(name.len());
+        if let Some(v) = self.decls.as_mut() {
+            v.push(DeclSpan {
+                name: name.to_string(),
+                kind,
+                line: t.line,
+                col: start,
+                end_col: end,
+                parent,
+            });
+        }
     }
 
     fn peek(&self) -> &Tok {
@@ -57,6 +105,21 @@ impl Parser {
     fn skip_newlines(&mut self) {
         while matches!(self.peek(), Tok::Newline) {
             self.advance();
+        }
+    }
+
+    // A statement must end at a line boundary: Newline (also produced by `;`),
+    // Dedent, or Eof. Anything else means trailing junk on the line (e.g.
+    // `return x  999`), which we reject instead of silently starting a new stmt.
+    fn expect_stmt_end(&mut self) -> PResult<()> {
+        if matches!(self.peek(), Tok::Newline | Tok::Dedent | Tok::Eof) {
+            Ok(())
+        } else {
+            Err(format!(
+                "line {}: unexpected {:?} after statement (expected end of line)",
+                self.line(),
+                self.peek()
+            ))
         }
     }
 
@@ -123,7 +186,9 @@ impl Parser {
                         ty: Type::Named("Self".into()),
                     });
                 } else {
-                    let name = self.ident()?;
+                    let (name, nidx) = self.ident_idx()?;
+                    let parent = self.cur_parent.clone();
+                    self.rec(&name, DeclKind::Param, nidx, parent);
                     let ty = if self.eat(&Tok::Colon) {
                         self.parse_type()?
                     } else {
@@ -140,9 +205,26 @@ impl Parser {
         Ok((params, is_method))
     }
 
-    fn parse_fn(&mut self, exported: bool, _in_impl: bool) -> PResult<FnDef> {
-        let name = self.ident()?;
+    fn parse_fn(&mut self, exported: bool, in_impl: bool) -> PResult<FnDef> {
+        let (name, nidx) = self.ident_idx()?;
+        let kind = if in_impl {
+            DeclKind::Method
+        } else {
+            DeclKind::Fn
+        };
+        let parent = if in_impl {
+            self.cur_parent.clone()
+        } else {
+            None
+        };
+        self.rec(&name, kind, nidx, parent);
+        // params record against this fn as parent (spanned mode only)
+        let prev = self.cur_parent.take();
+        if self.decls.is_some() {
+            self.cur_parent = Some(name.clone());
+        }
         let (params, is_method) = self.parse_params()?;
+        self.cur_parent = prev;
         let ret = if self.eat(&Tok::Arrow) {
             self.parse_type()?
         } else {
@@ -170,13 +252,15 @@ impl Parser {
 
     fn parse_struct(&mut self) -> PResult<StructDef> {
         self.expect(&Tok::Struct)?;
-        let name = self.ident()?;
+        let (name, nidx) = self.ident_idx()?;
+        self.rec(&name, DeclKind::Struct, nidx, None);
         self.expect(&Tok::Colon)?;
         self.expect(&Tok::Newline)?;
         self.expect(&Tok::Indent)?;
         let mut fields = Vec::new();
         while !self.check(&Tok::Dedent) {
-            let fname = self.ident()?;
+            let (fname, fidx) = self.ident_idx()?;
+            self.rec(&fname, DeclKind::Field, fidx, Some(name.clone()));
             self.expect(&Tok::Colon)?;
             let ty = self.parse_type()?;
             fields.push(Field { name: fname, ty });
@@ -193,15 +277,21 @@ impl Parser {
     fn parse_impl(&mut self) -> PResult<Item> {
         self.expect(&Tok::Impl)?;
 
-        let first = self.ident()?;
-        let target = if self.eat(&Tok::For) {
-            self.ident()?
+        let (first, fidx) = self.ident_idx()?;
+        let (target, tidx) = if self.eat(&Tok::For) {
+            self.ident_idx()?
         } else {
-            first
+            (first, fidx)
         };
+        // Record the impl target as a Struct reference site (methods link to it).
+        self.rec(&target, DeclKind::Struct, tidx, None);
         self.expect(&Tok::Colon)?;
         self.expect(&Tok::Newline)?;
         self.expect(&Tok::Indent)?;
+        let prev = self.cur_parent.take();
+        if self.decls.is_some() {
+            self.cur_parent = Some(target.clone());
+        }
         let mut methods = Vec::new();
         while !self.check(&Tok::Dedent) {
             self.skip_newlines();
@@ -212,6 +302,7 @@ impl Parser {
             methods.push(self.parse_fn(false, true)?);
             self.skip_newlines();
         }
+        self.cur_parent = prev;
         self.expect(&Tok::Dedent)?;
 
         Ok(Item::Struct(StructDef {
@@ -254,8 +345,16 @@ impl Parser {
                 break;
             }
             self.expect(&Tok::Fn)?;
-            let name = self.ident()?;
+            let (name, nidx) = self.ident_idx()?;
+            // Extern fns are callable named decls - record like a normal fn so
+            // tooling navigation matches. Params record against this fn.
+            self.rec(&name, DeclKind::Fn, nidx, None);
+            let prev = self.cur_parent.take();
+            if self.decls.is_some() {
+                self.cur_parent = Some(name.clone());
+            }
             let (params, _) = self.parse_params()?;
+            self.cur_parent = prev;
             let ret = if self.eat(&Tok::Arrow) {
                 self.parse_type()?
             } else {
@@ -274,7 +373,9 @@ impl Parser {
             self.expect(&Tok::Import)?;
             let mut names = Vec::new();
             loop {
-                names.push(self.ident()?);
+                let (nm, idx) = self.ident_idx()?;
+                self.rec(&nm, DeclKind::Import, idx, Some(module.clone()));
+                names.push(nm);
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
@@ -286,7 +387,12 @@ impl Parser {
             })
         } else {
             self.expect(&Tok::Import)?;
+            let midx = self.pos;
             let module = self.dotted_module()?;
+            // Anchor the span to the first segment's token (clean single-token
+            // span); dotted tails aren't separately navigable.
+            let seg = module.split('.').next().unwrap_or(&module).to_string();
+            self.rec(&seg, DeclKind::Import, midx, None);
             let alias = if self.eat(&Tok::As) {
                 Some(self.ident()?)
             } else {
@@ -346,39 +452,17 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> PResult<Stmt> {
-        match self.peek() {
-            Tok::Let | Tok::Mut => {
-                let mutable = matches!(self.advance(), Tok::Mut);
-                let name = self.ident()?;
-                let ty = if self.eat(&Tok::Colon) {
-                    self.parse_type()?
-                } else {
-                    Type::Unknown
-                };
-                self.expect(&Tok::Assign)?;
-                let value = self.parse_expr()?;
-                Ok(Stmt::Let {
-                    name,
-                    mutable,
-                    ty,
-                    value,
-                })
-            }
-            Tok::Return => {
-                self.advance();
-                if matches!(self.peek(), Tok::Newline | Tok::Dedent | Tok::Eof) {
-                    Ok(Stmt::Return(None))
-                } else {
-                    Ok(Stmt::Return(Some(self.parse_expr()?)))
-                }
-            }
-            Tok::If => self.parse_if(),
+        // Compound statements own their block (and its Dedent), so they're
+        // self-terminating and return early. Leaf statements build `stmt` and
+        // fall through to a shared end-of-line check that rejects trailing junk.
+        let stmt = match self.peek() {
+            Tok::If => return self.parse_if(),
             Tok::While => {
                 self.advance();
                 let cond = self.parse_expr()?;
                 self.expect(&Tok::Colon)?;
                 let body = self.parse_block()?;
-                Ok(Stmt::While { cond, body })
+                return Ok(Stmt::While { cond, body });
             }
             Tok::For => {
                 self.advance();
@@ -387,15 +471,7 @@ impl Parser {
                 let iter = self.parse_expr()?;
                 self.expect(&Tok::Colon)?;
                 let body = self.parse_block()?;
-                Ok(Stmt::For { var, iter, body })
-            }
-            Tok::Break => {
-                self.advance();
-                Ok(Stmt::Break)
-            }
-            Tok::Continue => {
-                self.advance();
-                Ok(Stmt::Continue)
+                return Ok(Stmt::For { var, iter, body });
             }
             Tok::Try => {
                 self.advance();
@@ -407,36 +483,71 @@ impl Parser {
                 let catch_var = self.ident()?;
                 self.expect(&Tok::Colon)?;
                 let catch_body = self.parse_block()?;
-                Ok(Stmt::Try {
+                return Ok(Stmt::Try {
                     body,
                     catch_var,
                     catch_body,
-                })
+                });
+            }
+            Tok::Let | Tok::Mut => {
+                let mutable = matches!(self.advance(), Tok::Mut);
+                let name = self.ident()?;
+                let ty = if self.eat(&Tok::Colon) {
+                    self.parse_type()?
+                } else {
+                    Type::Unknown
+                };
+                self.expect(&Tok::Assign)?;
+                let value = self.parse_expr()?;
+                Stmt::Let {
+                    name,
+                    mutable,
+                    ty,
+                    value,
+                }
+            }
+            Tok::Return => {
+                self.advance();
+                if matches!(self.peek(), Tok::Newline | Tok::Dedent | Tok::Eof) {
+                    Stmt::Return(None)
+                } else {
+                    Stmt::Return(Some(self.parse_expr()?))
+                }
+            }
+            Tok::Break => {
+                self.advance();
+                Stmt::Break
+            }
+            Tok::Continue => {
+                self.advance();
+                Stmt::Continue
             }
             Tok::Raise => {
                 self.advance();
                 let e = self.parse_expr()?;
-                Ok(Stmt::Raise(e))
+                Stmt::Raise(e)
             }
             _ => {
                 let e = self.parse_expr()?;
                 if self.eat(&Tok::Assign) {
                     let value = self.parse_expr()?;
-                    Ok(Stmt::Assign { target: e, value })
+                    Stmt::Assign { target: e, value }
                 } else if let Some(op) = self.compound_op() {
-
                     let rhs = self.parse_expr()?;
                     let value = Expr::Binary {
                         op,
                         lhs: Box::new(e.clone()),
                         rhs: Box::new(rhs),
                     };
-                    Ok(Stmt::Assign { target: e, value })
+                    Stmt::Assign { target: e, value }
                 } else {
-                    Ok(Stmt::ExprStmt(e))
+                    Stmt::ExprStmt(e)
                 }
             }
-        }
+        };
+        // Leaf statement must end the line; trailing tokens are an error.
+        self.expect_stmt_end()?;
+        Ok(stmt)
     }
 
     fn compound_op(&mut self) -> Option<BinOp> {
@@ -842,6 +953,13 @@ impl Parser {
             )),
         }
     }
+
+    // Like ident(), but also returns the name token's index (for span recording).
+    fn ident_idx(&mut self) -> PResult<(String, usize)> {
+        let idx = self.pos;
+        let s = self.ident()?;
+        Ok((s, idx))
+    }
 }
 
 fn parse_fstring(s: &str) -> Vec<FStrPart> {
@@ -906,5 +1024,89 @@ impl Parser {
     fn parse_expr_top(&mut self) -> PResult<Expr> {
         self.skip_newlines();
         self.parse_expr()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ast::DeclKind;
+    use crate::parse_program_spanned;
+
+    // Every decl span must slice back to exactly its own name in the source.
+    #[test]
+    fn spans_map_to_names() {
+        let src = "from math import sqrt, pi\n\
+                   struct Point:\n    x: int\n    y: int\n\
+                   impl Point:\n    fn dist(self, other):\n        return sqrt(other)\n\
+                   fn main(a, b):\n    print(a)\n";
+        let (_, decls) = parse_program_spanned(src).expect("parse");
+        let lines: Vec<&str> = src.split('\n').collect();
+        for d in &decls {
+            let l = lines[d.line - 1];
+            let slice = &l[d.col - 1..d.end_col - 1];
+            assert_eq!(slice, d.name, "span mismatch for {:?}", d);
+        }
+        // Spot-check kinds/parents are wired up.
+        assert!(decls
+            .iter()
+            .any(|d| d.kind == DeclKind::Method && d.name == "dist"
+                && d.parent.as_deref() == Some("Point")));
+        assert!(decls
+            .iter()
+            .any(|d| d.kind == DeclKind::Param && d.name == "other"
+                && d.parent.as_deref() == Some("dist")));
+        assert!(decls
+            .iter()
+            .any(|d| d.kind == DeclKind::Import && d.name == "sqrt"));
+    }
+
+    // The normal (spanless) parse path must yield no decls.
+    #[test]
+    fn spanless_path_collects_nothing() {
+        let toks = crate::lexer::Lexer::new("fn f():\n    return 1\n")
+            .tokenize()
+            .unwrap();
+        let mut p = super::Parser::new(toks);
+        p.parse_program().unwrap();
+        assert!(p.take_decls().is_empty());
+    }
+
+    // Trailing tokens after a statement are junk and must be rejected, not
+    // silently parsed as a second statement. Regression for `return x 999`,
+    // `let x = 1 2`, bare-literal-then-more, `f() garbage`, etc.
+    #[test]
+    fn rejects_trailing_junk_after_statement() {
+        let bad = [
+            "fn f():\n    return 1 999\n",
+            "fn f():\n    let x = 1 2 3\n    return x\n",
+            "fn f():\n    return \"neg\" 321313\n",
+            "fn main():\n    print(1) garbage\n",
+            "fn main():\n    421421412241 7\n",
+        ];
+        for src in bad {
+            assert!(
+                crate::parse_program(src).is_err(),
+                "should reject trailing junk: {src:?}"
+            );
+        }
+    }
+
+    // `;` is a statement separator (lexes to Newline), so these stay valid.
+    // Compound statements remain self-terminating. Guards against over-rejection.
+    #[test]
+    fn accepts_valid_statement_ends() {
+        let good = [
+            "fn main():\n    print(1); print(2)\n",
+            "fn main():\n    print(1);\n",
+            "fn f(n: i64):\n    if n > 0:\n        return n\n    else:\n        return 0\n",
+            "fn main():\n    for i in 0..3:\n        print(i)\n",
+            "fn main():\n    let x = 1\n    x += 5\n",
+        ];
+        for src in good {
+            assert!(
+                crate::parse_program(src).is_ok(),
+                "should accept valid stmt end: {src:?}"
+            );
+        }
     }
 }

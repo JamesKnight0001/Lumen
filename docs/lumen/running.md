@@ -52,7 +52,7 @@ lumen doctor
 ```
 
 ```
-Lumen 0.71.0 - toolchain check
+Lumen 0.73.0 - toolchain check
 
   gcc      found    C:\msys64\mingw64\bin\gcc.exe  (via auto-detected)
   windres  found    C:\msys64\mingw64\bin\windres.exe  (via auto-detected)  [optional, for --icon]
@@ -92,8 +92,30 @@ lumen emit   file.lm               print the generated x86-64 assembly
 lumen doctor                       check the native-build toolchain (gcc, windres)
 lumen tokens file.lm               dump the token stream (for debugging)
 lumen ast    file.lm               dump the parsed syntax tree (for debugging)
+lumen decls  file.lm               dump declaration name spans as TSV (tooling)
 lumen version                      print the version
 ```
+
+### `lumen decls` (tooling / language server)
+
+`decls` parses a single file and prints one tab-separated row per *named
+declaration* - functions, methods, structs, fields, params, and imports - with
+the exact source span of each name:
+
+```
+kind<TAB>name<TAB>line<TAB>col<TAB>end_col<TAB>parent
+```
+
+Lines and columns are 1-based; `end_col` is exclusive; `parent` is the enclosing
+struct (for fields/methods) or function (for params), empty otherwise. It runs
+*before* import resolution so it works on one file in isolation, which is what a
+language server ([Lumenlance](https://github.com/lumen-lang/lumenlance)) needs
+for go-to-definition and rename. The spans come straight from the parser, so
+they always agree with how the compiler actually read your code.
+
+This is a read-only front-end query: it shares the lexer and parser with `run`
+and `build` but collects spans into a side-table that the normal compile path
+never allocates, so it adds **zero** cost to running or building a program.
 
 ## The REPL
 
