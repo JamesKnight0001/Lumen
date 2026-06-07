@@ -10,6 +10,14 @@
  * TO IDENTICAL TO EXISTING C LIBRARY FUNCTIONS!
  */
 
+
+/* Plans for v1.0.0
+* Increase the speed, to be close to C as much possible,
+* right now it is 1:1 with C in `fib(32)` but its still not enough.
+* The compiler already deletes bloat functions and variables from the built-in module,
+* and the codebase itself, but we can try to copy rust's ability to optimize.
+*/
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +48,8 @@ typedef uint64_t LumenVal;
  *     (SIGN=0, 3-bit tag at TAG_SHIFT selects int/bool/nil, 48-bit payload).
  * Pointers and ints are limited to 48 bits, which is why integers wrap at 48.
  */
+
+// DO NOT CHANGE
 #define QNAN      0x7FF8000000000000ULL
 #define SIGN      0x8000000000000000ULL
 #define TAG_SHIFT 48
@@ -206,6 +216,7 @@ __attribute__((naked, noinline)) int lumen_setjmp(LumenJmp *buf __attribute__((u
 // (forced to 1 if zero, so the catch path always sees a nonzero result).
 // Win64 args: buf in rcx, val in edx.
 __attribute__((naked, noinline, noreturn)) void lumen_longjmp(LumenJmp *buf __attribute__((unused)), int val __attribute__((unused))) {
+    // IF YOU DON'T UNDERSTAND IT, DO NOT TOUCH IT.
     __asm__ volatile(
         "movq 0(%rcx), %rbx\n\t"
         "movq 8(%rcx), %rbp\n\t"
@@ -312,6 +323,7 @@ static inline size_t gc_hash_ptr(void *p) {
     return (size_t)(x >> 32);
 }
 
+// adds a pointer to a hashset if it isn't already present.
 static void gc_set_insert_raw(void **tbl, size_t cap, void *p) {
     size_t mask = cap - 1;
     size_t i = gc_hash_ptr(p) & mask;
@@ -321,6 +333,7 @@ static void gc_set_insert_raw(void **tbl, size_t cap, void *p) {
     }
     tbl[i] = p;
 }
+
 
 static void gc_set_grow(size_t want) {
     size_t cap = gc_set_cap ? gc_set_cap : 512;
