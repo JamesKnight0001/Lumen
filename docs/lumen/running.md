@@ -27,6 +27,53 @@ link, and gives you a standalone native executable. No runtime to install, no
 bytecode, just an `.exe`. This is what you ship, and what the
 [benchmarks](performance.md) measure.
 
+### Finding the C toolchain (you don't have to set PATH)
+
+`lumen build` shells out to GCC (the MinGW-w64 toolchain on Windows) for the
+final assemble-and-link step. You do **not** have to put it on your `PATH`
+first. Lumen locates it for you, in this order:
+
+1. an explicit override - `LUMEN_CC` (then the generic `CC`) pointing at a
+   `gcc.exe`;
+2. `gcc` already on `PATH`;
+3. a scan of the standard install roots: MSYS2 (`C:\msys64\{mingw64,ucrt64,
+   clang64}\bin`), standalone MinGW-w64 (`C:\mingw64\bin`, ...), the Scoop
+   mingw app, and the rustup `*-gnu` toolchain.
+
+The first hit wins, and Lumen puts that toolchain's own `bin` on the child
+process's `PATH` so `gcc` can find its sibling `as`/`ld`. This is why a build
+that fails from a fresh PowerShell (`could not run gcc`) just works once GCC is
+installed anywhere standard - no shell configuration needed.
+
+To see exactly what Lumen finds, run `lumen doctor`:
+
+```
+lumen doctor
+```
+
+```
+Lumen 0.69.0 - toolchain check
+
+  gcc      found    C:\msys64\mingw64\bin\gcc.exe  (via auto-detected)
+  windres  found    C:\msys64\mingw64\bin\windres.exe  (via auto-detected)  [optional, for --icon]
+
+Native builds are ready: `lumen build file.lm -o file.exe`
+```
+
+If no compiler is found, `doctor` prints install instructions (MSYS2 / winget /
+scoop) and exits non-zero. To force a specific compiler, set `LUMEN_CC`:
+
+```
+set LUMEN_CC=C:\path\to\gcc.exe      # cmd
+$env:LUMEN_CC = 'C:\path\to\gcc.exe' # PowerShell
+```
+
+> **PowerShell `&&` note:** `lumen build app.lm -o app.exe && .\app.exe` fails in
+> *Windows PowerShell 5.x* with `The token '&&' is not a valid statement
+> separator` - that's PowerShell, not Lumen. Use `;` (runs the second command
+> regardless), upgrade to PowerShell 7+ (which supports `&&`), or run the two
+> commands on separate lines.
+
 A few features (notably FFI callbacks) only work in a compiled program, because
 they need a real machine-code address to hand to the OS. The interpreter tells
 you clearly when you've hit one.
@@ -42,6 +89,7 @@ lumen new    <name>                scaffold a new project directory
 lumen init                         scaffold a project in the current directory
 lumen check  file.lm               parse + compile-check only, produce nothing
 lumen emit   file.lm               print the generated x86-64 assembly
+lumen doctor                       check the native-build toolchain (gcc, windres)
 lumen tokens file.lm               dump the token stream (for debugging)
 lumen ast    file.lm               dump the parsed syntax tree (for debugging)
 lumen version                      print the version

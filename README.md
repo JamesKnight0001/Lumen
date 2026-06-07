@@ -25,7 +25,7 @@ fn main():
 ```
 
 ## Version
-Compiler: V0.69.0
+Compiler: V0.70.0
 
 # Install using Installer:
 [Lumen installer](https://github.com/JamesKnight0001/Lumen_installer)
@@ -37,7 +37,10 @@ All it takes is 2 clicks, to install lumen.
 Requirements:
 
 * Rust (via rustup)
-* GCC/Clang (used for assembling and linking compiled programs)
+* GCC/Clang (used for assembling and linking compiled programs). On Windows,
+  install MinGW-w64 (e.g. via MSYS2) anywhere standard and Lumen finds it
+  automatically - no PATH setup needed. Run `lumen doctor` to confirm, or set
+  `LUMEN_CC` to point at a specific `gcc.exe`.
 
 Build:
 
@@ -67,6 +70,7 @@ lumen -c 'fn main(): print(2 ** 10)'
 | `lumen -c "<src>"`    | Run inline source              |
 | `lumen check <file>`  | Parse and compile-check        |
 | `lumen emit <file>`   | Emit generated assembly        |
+| `lumen doctor`        | Check the native-build toolchain (gcc, windres) |
 | `lumen ast <file>`    | Print AST                      |
 | `lumen tokens <file>` | Print token stream             |
 

@@ -26,6 +26,8 @@ fn main() {
         }
         "help" | "--help" | "-h" => return print_usage(),
 
+        "doctor" => return run_doctor(),
+
         "new" => {
             let name = args.get(2).map(String::as_str).unwrap_or_else(|| {
                 fatal("usage: lumen new <project-name>");
@@ -149,10 +151,23 @@ fn build(prog: &ast::Program, file: &str, src: &str, args: &[String]) {
 
     let icon_obj = icon.as_deref().and_then(|p| make_icon(p, stem));
 
-    // Link the generated asm and runtime with gcc. -ffunction-sections plus
-    // --gc-sections drops unused code so the binary stays small; extern blocks
-    // contribute their own -l flags below.
-    let mut cmd = Command::new("gcc");
+    // Locate the GNU toolchain ourselves rather than relying on PATH, so
+    let cc = lumenc::toolchain::find_cc()
+        .unwrap_or_else(|| fatal(&format!("error: {}", lumenc::toolchain::install_hint())));
+    let mut cmd = Command::new(&cc.program);
+    // Put the toolchain's own bin dir on the child's PATH so gcc can find its
+    // sibling `as`/`ld`/`collect2` even when the parent shell never had it.
+    if let Some(bin) = &cc.bin_dir {
+        if let Some(old) = std::env::var_os("PATH") {
+            let mut paths = vec![bin.clone()];
+            paths.extend(std::env::split_paths(&old));
+            if let Ok(joined) = std::env::join_paths(paths) {
+                cmd.env("PATH", joined);
+            }
+        } else {
+            cmd.env("PATH", bin);
+        }
+    }
     cmd.args([
         "-O2",
         "-s",
@@ -224,7 +239,24 @@ fn make_icon(icon_path: &str, stem: &str) -> Option<String> {
         eprintln!("warning: could not write resource script; building without an icon");
         return None;
     }
-    let status = Command::new("windres")
+    // windres lives alongside gcc in the same toolchain; locate it the same way.
+    let windres = lumenc::toolchain::find_tool("windres", Some("LUMEN_WINDRES"));
+    let Some(windres) = windres else {
+        eprintln!("warning: windres not found; building without an icon");
+        let _ = std::fs::remove_file(&rc_path);
+        return None;
+    };
+    let mut wcmd = Command::new(&windres.program);
+    if let Some(bin) = &windres.bin_dir {
+        if let Some(old) = std::env::var_os("PATH") {
+            let mut paths = vec![bin.clone()];
+            paths.extend(std::env::split_paths(&old));
+            if let Ok(joined) = std::env::join_paths(paths) {
+                wcmd.env("PATH", joined);
+            }
+        }
+    }
+    let status = wcmd
         .args([
             "--input",
             &rc_path,
@@ -435,9 +467,42 @@ fn print_usage() {
     eprintln!("  lumen check  <file.lm>               parse + compile-check, no output");
     eprintln!("  lumen emit   <file.lm>               print generated x86-64 assembly");
     eprintln!("  lumen repl                           interactive read-eval-print loop");
+    eprintln!("  lumen doctor                         check the native-build toolchain (gcc, windres)");
     eprintln!("  lumen tokens <file.lm>               dump tokens (debug)");
     eprintln!("  lumen ast    <file.lm>               dump the AST (debug)");
     eprintln!("  lumen version                        print the version");
+}
+
+// `lumen doctor`: report whether the native-build toolchain is reachable
+fn run_doctor() {
+    println!("Lumen {} - toolchain check\n", env!("CARGO_PKG_VERSION"));
+    let mut ok = true;
+    match lumenc::toolchain::find_cc() {
+        Some(t) => println!(
+            "  gcc      found    {}  (via {})",
+            t.program.display(),
+            t.source
+        ),
+        None => {
+            ok = false;
+            println!("  gcc      MISSING  (required for `lumen build`)");
+        }
+    }
+    match lumenc::toolchain::find_tool("windres", Some("LUMEN_WINDRES")) {
+        Some(t) => println!(
+            "  windres  found    {}  (via {})  [optional, for --icon]",
+            t.program.display(),
+            t.source
+        ),
+        None => println!("  windres  missing  (optional; only needed for --icon)"),
+    }
+    println!();
+    if ok {
+        println!("Native builds are ready: `lumen build file.lm -o file.exe`");
+    } else {
+        println!("{}", lumenc::toolchain::install_hint());
+        std::process::exit(1);
+    }
 }
 
 fn run_repl() {

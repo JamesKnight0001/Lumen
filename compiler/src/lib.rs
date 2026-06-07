@@ -19,6 +19,7 @@ pub mod lift;
 pub mod mir;
 pub mod opt;
 pub mod parser;
+pub mod toolchain;
 pub mod types;
 
 use std::path::Path;
