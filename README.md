@@ -168,6 +168,9 @@ Current limitations:
 * `docs/syntax/` - reference documentation
 * `examples/` - language tour and larger sample projects
 
+## Credits
+Thanks to friends who used the language to bug find!
+
 ## Author
 By James Phifer [JamesKnight0001]
 
