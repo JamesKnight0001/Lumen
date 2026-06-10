@@ -1,0 +1,15 @@
+# A child package module. `..shared` climbs out of pkg/ to the example root;
+# `.helpers` stays in pkg/; `pkg.extra` is the absolute path to a sibling and
+# must resolve from the project root, not double to pkg/pkg/extra.lm.
+import ..shared
+import .helpers
+import pkg.extra
+
+fn greet(name):
+    return helpers.banner(name) + " (v" + str(shared.version()) + ")"
+
+fn bump(n):
+    return helpers.inc(n)
+
+fn tagged(name):
+    return name + extra.tag()

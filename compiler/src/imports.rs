@@ -8,30 +8,51 @@ use crate::ast::{Expr, FStrPart, Item, Program, Stmt};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-fn module_to_path(base_dir: &Path, module: &str) -> (PathBuf, String) {
-    let segs: Vec<&str> = module.split('.').collect();
+fn module_to_path(base_dir: &Path, root: &Path, module: &str, level: u8) -> (PathBuf, String) {
+    let segs: Vec<&str> = module.split('.').filter(|s| !s.is_empty()).collect();
     let access = segs.last().copied().unwrap_or(module).to_string();
 
-    // First the compiler's original rule: sibling file relative to the entry
-    // dir. If that exists, use it (keeps every existing project working).
-    let mut sib = base_dir.to_path_buf();
-    for s in &segs {
-        sib.push(s);
+    // Relative import (`.mod`, `..mod`): anchor to the importing file's dir and
+    // walk up (level-1) parents. No package-root fallback - relative is explicit.
+    if level > 0 {
+        let mut dir = base_dir.to_path_buf();
+        for _ in 1..level {
+            dir.pop();
+        }
+        for s in &segs {
+            dir.push(s);
+        }
+        dir.set_extension("lm");
+        return (dir, access);
     }
-    sib.set_extension("lm");
+
+    // Absolute import. Try the importing file's own dir first (sibling rule, so
+    // a submodule's `import sib` keeps working), then the project root (entry
+    // dir), so `import folder.a` means the same thing from any file. Without the
+    // root fallback a submodule's `import folder.b` would wrongly double to
+    // folder/folder/b.lm.
+    let candidate = |start: &Path| -> PathBuf {
+        let mut p = start.to_path_buf();
+        for s in &segs {
+            p.push(s);
+        }
+        p.set_extension("lm");
+        p
+    };
+    let sib = candidate(base_dir);
     if sib.exists() {
         return (sib, access);
+    }
+    let from_root = candidate(root);
+    if from_root.exists() {
+        return (from_root, access);
     }
 
     // Else search package dirs (installed via `lumen install`): the active venv
     // (LUMEN_VENV) then a project-local lumen_modules/. Lets installed packages
     // resolve by bare name without changing the sibling-import behavior above.
-    for root in module_search_roots() {
-        let mut p = root;
-        for s in &segs {
-            p.push(s);
-        }
-        p.set_extension("lm");
+    for r in module_search_roots() {
+        let p = candidate(&r);
         if p.exists() {
             return (p, access);
         }
@@ -58,6 +79,7 @@ fn module_search_roots() -> Vec<PathBuf> {
 pub fn collect(
     prog: &Program,
     base_dir: &Path,
+    root: &Path,
     visited: &mut HashSet<String>,
     out: &mut Vec<Item>,
     aliases: &mut HashMap<String, String>,
@@ -66,11 +88,11 @@ pub fn collect(
     for item in prog {
         let Item::Import(imp) = item else { continue };
         let module = &imp.module;
-        if is_builtin(module) {
-
+        // Relative imports (level > 0) are always file imports, never builtins.
+        if imp.level == 0 && is_builtin(module) {
             continue;
         }
-        let (path, access) = module_to_path(base_dir, module);
+        let (path, access) = module_to_path(base_dir, root, module, imp.level);
 
         let access_name = imp.alias.clone().unwrap_or(access);
         aliases.insert(access_name, module.clone());
@@ -93,7 +115,7 @@ pub fn collect(
 
         let sub_dir = path.parent().unwrap_or(base_dir).to_path_buf();
         let mut sub_aliases = HashMap::new();
-        collect(&sub, &sub_dir, visited, out, &mut sub_aliases, is_builtin)?;
+        collect(&sub, &sub_dir, root, visited, out, &mut sub_aliases, is_builtin)?;
         let start = out.len();
         for it in &sub {
             match it {

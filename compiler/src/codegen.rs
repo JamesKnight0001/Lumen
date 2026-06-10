@@ -234,7 +234,15 @@ impl Codegen {
         let mut out = String::new();
         out.push_str("    .intel_syntax noprefix\n    .text\n    .globl main\n\n");
 
-        let fns: Vec<FnDef> = self.fns.values().cloned().collect();
+        // Emit in source order (deterministic). Iterating self.fns (a HashMap)
+        // would randomize fn order per build, breaking reproducible output.
+        let fns: Vec<FnDef> = prog
+            .iter()
+            .filter_map(|it| match it {
+                Item::Fn(f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect();
 
         // A function gets a second ".raw" entry point (unboxed Win64 ABI: ints in
         // registers, no NaN-box) when both its params and return are proven int.
@@ -462,6 +470,38 @@ impl Codegen {
 
             _ => !Self::ident_used_in_stmt(var, s),
         })
+    }
+
+    // An int var is a safe register accumulator across a loop body when every use
+    // is either (a) an assignment `var = <expr>` whose rhs reads var only as a
+    // plain value (no escape), or (b) a read in a non-assigning statement that
+    // doesn't let it escape into an alias. Mirrors float_accum_safe. The var must
+    // also be a known raw-int so its slot holds an unboxed i64.
+    fn int_accum_safe(var: &str, body: &[Stmt]) -> bool {
+        body.iter().all(|s| match s {
+            Stmt::Assign {
+                target: Expr::Ident(t),
+                value,
+            } if t == var => Self::int_rhs_safe(var, value),
+            _ => !Self::ident_used_in_stmt(var, s),
+        })
+    }
+
+    fn int_rhs_safe(var: &str, e: &Expr) -> bool {
+        match e {
+            Expr::Ident(_) => true,
+            Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Nil => true,
+            Expr::Unary { expr, .. } => Self::int_rhs_safe(var, expr),
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::int_rhs_safe(var, lhs) && Self::int_rhs_safe(var, rhs)
+            }
+            Expr::Index { obj, index } => {
+                // Reading an element is fine; the var must not appear inside the
+                // receiver/index in a way that aliases it (it can be the index value).
+                Self::int_rhs_safe(var, obj) && Self::int_rhs_safe(var, index)
+            }
+            other => !Self::ident_used_in_expr(var, other),
+        }
     }
 
     fn float_rhs_safe(var: &str, e: &Expr) -> bool {
@@ -692,9 +732,11 @@ impl Codegen {
         raw_abi: bool,
     ) -> Result<String, String> {
 
-        const MIR_ENABLED: bool = false;
+        // MIR numeric tier (SSA + linear-scan regalloc) is opt-in via LUMEN_MIR=1
+        // while it's proven byte-identical against the AST path (see plan S2).
+        let mir_on = std::env::var("LUMEN_MIR").as_deref() == Ok("1");
         let mut mir_body: Option<String> = None;
-        if MIR_ENABLED && raw_abi && crate::mir::mir_eligible(f, &self.int_info) {
+        if mir_on && raw_abi && crate::mir::mir_eligible(f, &self.int_info) {
             if let Ok(mir) = crate::mir::lower_fn(f, &self.mir_sigs) {
                 if Self::mir_all_int(&mir) {
                     let ra = crate::mir::regalloc(&mir);
@@ -968,7 +1010,11 @@ impl Codegen {
                     let off = self.slot(ctx, n);
                     if ctx.is_raw(n) {
                         self.eval_raw(value, ctx, out)?;
-                        let _ = writeln!(out, "    mov [rbp{off}], rax");
+                        if let Some(reg) = ctx.int_loc.get(n) {
+                            let _ = writeln!(out, "    mov {reg}, rax");
+                        } else {
+                            let _ = writeln!(out, "    mov [rbp{off}], rax");
+                        }
                     } else if ctx.is_raw_float(n) {
                         self.eval_raw_float(value, ctx, out)?;
 
@@ -1279,6 +1325,45 @@ impl Codegen {
             }
         }
 
+        // Int accumulators: hoist a raw-int var that is read+written every iteration
+        // into a callee-saved GPR for the loop, so the body uses register arithmetic
+        // instead of load/store to its slot. Same safety discipline as floats: the
+        // var must be raw-int, not the loop var, not already register-mapped, and
+        // only ever read-as-value (int_accum_safe). Flushed back to its slot at loop
+        // exit. Callee-saved so it survives any call in the body (e.g. an index slow
+        // path). Reuses int_loc which the ident/eval_raw paths already honor.
+        let mut int_promoted: Vec<String> = Vec::new();
+        {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for st in body.iter() {
+                if let Stmt::Assign {
+                    target: Expr::Ident(v),
+                    ..
+                } = st
+                {
+                    if v != var
+                        && ctx.is_raw(v)
+                        && !ctx.int_loc.contains_key(v)
+                        && !seen.contains(v)
+                        && Self::int_accum_safe(v, body)
+                    {
+                        seen.insert(v.clone());
+                        int_promoted.push(v.clone());
+                    }
+                }
+            }
+        }
+        int_promoted.sort();
+        let mut int_promoted_active: Vec<(String, &'static str, i32)> = Vec::new();
+        for v in &int_promoted {
+            if let Some(reg) = self.acquire_callee_reg(ctx) {
+                let off = *ctx.locals.get(v).expect("raw-int local has a slot");
+                let _ = writeln!(out, "    mov {reg}, [rbp{off}]");
+                ctx.int_loc.insert(v.clone(), reg.to_string());
+                int_promoted_active.push((v.clone(), reg, off));
+            }
+        }
+
         let top = self.new_label("ftop");
         let end = self.new_label("fend");
         let cont = self.new_label("fcont");
@@ -1330,6 +1415,10 @@ impl Codegen {
         for (v, reg, off) in &promoted_active {
             let _ = writeln!(out, "    movsd qword ptr [rbp{off}], {reg}");
             ctx.float_loc.remove(v);
+        }
+        for (v, reg, off) in &int_promoted_active {
+            let _ = writeln!(out, "    mov [rbp{off}], {reg}");
+            ctx.int_loc.remove(v);
         }
         Ok(())
     }
@@ -1920,6 +2009,11 @@ impl Codegen {
             Expr::Call { callee, .. } => {
                 matches!(&**callee, Expr::Ident(n) if self.int_info.int_ret.contains(n))
             }
+            Expr::Index { obj, index } => {
+                matches!(&**obj, Expr::Ident(n)
+                    if self.int_info.is_int_list_var(&ctx.func_name, n))
+                    && self.idx_intish(index, ctx)
+            }
             _ => false,
         }
     }
@@ -2208,6 +2302,52 @@ impl Codegen {
                         out.push_str("    imul rax, rcx\n");
                     }
                 }
+            }
+
+            // Int-list unboxed read: bounds-checked inline load + unbox, skipping
+            // the lumen_index_get dispatch. Mirror of the float-list movsd path but
+            // the element is a NaN-boxed int, so we shl/sar-unbox instead. The slow
+            // path (negative/oob index) falls back to the runtime so it raises the
+            // same error and stays byte-identical.
+            Expr::Index { obj, index }
+                if matches!(&**obj, Expr::Ident(n)
+                    if self.int_info.is_int_list_var(&ctx.func_name, n))
+                    && self.idx_intish(index, ctx) =>
+            {
+                self.gen_expr(obj, ctx, out)?;
+                let objt = self.temp(ctx);
+                let _ = writeln!(out, "    mov [rbp{objt}], rax");
+
+                self.eval_raw(index, ctx, out)?;
+                let idxt = self.temp(ctx);
+                let _ = writeln!(out, "    mov [rbp{idxt}], rax");
+
+                let slow = self.new_label("ilidx_slow");
+                let done = self.new_label("ilidx_done");
+
+                let _ = writeln!(out, "    mov r8, [rbp{objt}]");
+                out.push_str("    mov r11, 0xFFFFFFFFFFFF\n    and r8, r11\n");
+
+                let _ = writeln!(out, "    mov r9, [rbp{idxt}]");
+                out.push_str("    test r9, r9\n");
+                let _ = writeln!(out, "    js {slow}");
+                out.push_str("    cmp r9, qword ptr [r8+16]\n");
+                let _ = writeln!(out, "    jae {slow}");
+
+                // items pointer at +32; element is a NaN-boxed int -> unbox into rax.
+                out.push_str("    mov r8, qword ptr [r8+32]\n");
+                out.push_str("    mov rax, qword ptr [r8+r9*8]\n");
+                Self::emit_unbox_int(out);
+                let _ = writeln!(out, "    jmp {done}");
+
+                let _ = writeln!(out, "{slow}:");
+                let _ = writeln!(out, "    mov rax, [rbp{idxt}]");
+                Self::emit_box_int(out);
+                out.push_str("    mov rdx, rax\n");
+                let _ = writeln!(out, "    mov rcx, [rbp{objt}]");
+                out.push_str("    call lumen_index_get\n");
+                Self::emit_unbox_int(out);
+                let _ = writeln!(out, "{done}:");
             }
 
             Expr::Call { callee, args }

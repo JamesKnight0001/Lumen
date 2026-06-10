@@ -29,6 +29,12 @@ import math                   # built-in modules use the same syntax
 - A plain name resolves to `<name>.lm` **in the same directory as the importing
   file**.
 - A dotted path maps onto nested directories: `import pkg.util` loads `pkg/util.lm`.
+- A **leading dot** makes the import *relative to the importing file's own
+  directory*, and each extra dot climbs one parent (Python-style):
+  `import .util` (same dir), `import ..common` (parent dir),
+  `import ...root.x` (two dirs up). `from .pkg import f` works too. This lets a
+  module in a subdirectory reach a sibling or a parent without the path being
+  anchored to the entry file.
 - The same syntax brings in the built-in modules, `math`, `os`, `rand`, `json`,
   `time`, `net`, `cffi`, that the runtime provides. See
   [the standard library](stdlib.md).

@@ -30,8 +30,21 @@ planned. See [imports](../syntax/imports.md).
 ## No incremental compilation
 
 Every `lumen build` recompiles the whole program from scratch. For the program
-sizes Lumen targets this is fast enough not to notice, but unchanged modules
-aren't cached.
+sizes Lumen targets this is fast enough not to notice (the entire compiler
+front-end is about 1% of build time - gcc is the other 99%), but unchanged
+modules aren't cached.
+
+## No auto-vectorizer
+
+The compiler emits honest scalar machine code. It does not generate SIMD, and it
+does not constant-fold whole loops into their closed-form answer. Production C
+and Rust compilers do both, which is why they can look dramatically faster on
+reducible numeric loops - often they've turned the loop into a handful of SIMD
+instructions, or deleted it entirely. On genuinely scalar, data-dependent work
+Lumen stays within ~2–3× of C. Closing that last gap would mean adding a
+vectorizer (large) or unboxing proven-int locals out of NaN-boxing (also large);
+both are noted in the speed roadmap, neither is done. See
+[performance](performance.md).
 
 ## FFI callbacks are compiled-only
 

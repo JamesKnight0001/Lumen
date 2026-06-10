@@ -1,6 +1,6 @@
 [package]
 name = "lumenc"
-version = "0.74.0"
+version = "0.77.0"
 edition = "2021"
 rust-version = "1.74"
 description = "The Lumen programming language: lexer, parser, tree-walking interpreter, and native x86-64 backend that produce byte-identical output."

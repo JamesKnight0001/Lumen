@@ -261,11 +261,13 @@ impl Lifter {
                 .map(|c| Param {
                     name: c.clone(),
                     ty: Type::Dynamic,
+                    default: None,
                 })
                 .collect();
             fn_params.extend(params.into_iter().map(|p| Param {
                 name: p,
                 ty: Type::Dynamic,
+                default: None,
             }));
 
             let def = FnDef {

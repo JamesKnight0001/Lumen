@@ -1,0 +1,36 @@
+# Maps: build, overwrite (order-preserving), lookup, has/get, remove, iterate.
+# Exercises the hashed interp map (S6) on the common string-key path that real
+# code uses; both backends must agree byte-for-byte.
+
+fn main():
+    let m = {"a": 1, "b": 2, "c": 3}
+    m["b"] = 20            # overwrite keeps b in its original slot
+    m["d"] = 4             # new key appends
+    print(m)               # {"a": 1, "b": 20, "c": 3, "d": 4}
+    print(len(m))          # 4
+
+    print(m.has("c"))      # true
+    print(m.has("z"))      # false
+    print(m.get("a"))      # 1
+    print(m.get("z", -1))  # -1
+
+    print(m.remove("c"))   # 3
+    print(m)               # {"a": 1, "b": 20, "d": 4}
+
+    print(m.keys())        # ["a", "b", "d"]
+    print(m.values())      # [1, 20, 4]
+
+    # iterate in insertion order, summing values
+    let total = 0
+    for k in m:
+        total = total + m[k]
+    print(total)           # 25
+
+    # integer keys work too
+    let counts = {}
+    for w in ["x", "y", "x", "x", "y"]:
+        if counts.has(w):
+            counts[w] = counts[w] + 1
+        else:
+            counts[w] = 1
+    print(counts)          # {"x": 3, "y": 2}

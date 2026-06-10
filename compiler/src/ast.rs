@@ -16,6 +16,8 @@ pub enum Type {
 pub struct Param {
     pub name: String,
     pub ty: Type,
+    // Default value for an omitted trailing arg (e.g. `fn f(a, b=10)`).
+    pub default: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +71,9 @@ pub struct ImportDef {
     pub module: String,
     pub alias: Option<String>,
     pub names: Vec<String>,
+    // Leading-dot count for relative imports: 0 = absolute (sibling/package),
+    // 1 = `.mod` (same dir), 2 = `..mod` (parent), n = (n-1) dirs up.
+    pub level: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -118,7 +123,7 @@ pub enum Stmt {
 pub enum Expr {
     Int(i64),
     Float(f64),
-    Str(String),
+    Str(std::rc::Rc<String>),
     FStr(Vec<FStrPart>),
     Bool(bool),
     Nil,

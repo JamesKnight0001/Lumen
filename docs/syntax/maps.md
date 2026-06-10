@@ -20,6 +20,18 @@ let squares = {1: 1, 2: 4, 3: 9}
 print(squares[2])        # 4
 ```
 
+Numeric keys follow the same rule as `==`: an integer and a whole-valued float
+that compare equal are the **same key**, so `m[1]` and `m[1.0]` reach the same
+slot. (Non-whole floats like `1.5` are keys in their own right.)
+
+```lumen
+let m = {}
+m[1] = "a"
+m[1.0] = "b"             # overwrites the same key
+print(m[1])              # b
+print(len(m))            # 1
+```
+
 ## Safe lookup
 
 Indexing a **missing** key with `m[key]` is an error, plain and simple. So when a

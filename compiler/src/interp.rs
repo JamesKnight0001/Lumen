@@ -9,6 +9,126 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
+// A hashable projection of a scalar key. Mirrors the native runtime's val_hash
+// (lumen_rt.c): a whole-valued finite float folds to its int form, so 1 and 1.0
+// are the SAME key - matching `==` (which coerces int/float) and the native
+// backend. Non-integral / non-finite floats hash by bits. NaN and non-scalars
+// aren't indexable (NaN != NaN; lists/maps never compare equal), so they're
+// excluded and fall back to a linear scan, which stays correct.
+#[derive(PartialEq, Eq, Hash)]
+enum MapKey {
+    Int(i64),
+    Float(u64), // raw bits of a finite, non-whole f64
+    Str(Rc<String>),
+    Bool(bool),
+    Nil,
+}
+
+fn map_key(v: &Value) -> Option<MapKey> {
+    match v {
+        Value::Int(n) => Some(MapKey::Int(*n)),
+        Value::Bool(b) => Some(MapKey::Bool(*b)),
+        Value::Nil => Some(MapKey::Nil),
+        Value::Str(s) => Some(MapKey::Str(s.clone())),
+        Value::Float(x) => {
+            if x.is_nan() {
+                None // NaN never equals anything
+            } else if x.is_finite() && x.floor() == *x && *x >= -9.2e18 && *x <= 9.2e18 {
+                Some(MapKey::Int(*x as i64)) // whole float == the int (and -0.0 -> 0)
+            } else {
+                Some(MapKey::Float(x.to_bits()))
+            }
+        }
+        _ => None, // lists/maps/etc: never compare equal, so never indexed
+    }
+}
+
+// Insertion-ordered map: a Vec keeps deterministic iteration order (the
+// byte-identical contract requires it), and an index maps hashable keys to their
+// Vec position for O(1) get/set/has/remove. Unhashable keys (see map_key) just
+// aren't in the index; ops fall back to a linear scan for them, staying correct.
+#[derive(Default)]
+pub struct LumenMap {
+    entries: Vec<(Value, Value)>,
+    index: HashMap<MapKey, usize>,
+}
+
+impl LumenMap {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    // Position of key in entries, via the index when hashable, else linear scan.
+    fn pos(&self, key: &Value) -> Option<usize> {
+        if let Some(k) = map_key(key) {
+            return self.index.get(&k).copied();
+        }
+        self.entries.iter().position(|(ek, _)| values_eq(ek, key))
+    }
+
+    fn get(&self, key: &Value) -> Option<Value> {
+        self.pos(key).map(|i| self.entries[i].1.clone())
+    }
+
+    fn has(&self, key: &Value) -> bool {
+        self.pos(key).is_some()
+    }
+
+    // Insert or overwrite, preserving the original position on overwrite.
+    fn set(&mut self, key: Value, val: Value) {
+        if let Some(i) = self.pos(&key) {
+            self.entries[i].1 = val;
+            return;
+        }
+        let i = self.entries.len();
+        if let Some(k) = map_key(&key) {
+            self.index.insert(k, i);
+        }
+        self.entries.push((key, val));
+    }
+
+    // Remove a key, returning its value. Removal shifts later positions, so the
+    // index is rebuilt - O(n), but remove is rare next to get/set.
+    fn remove(&mut self, key: &Value) -> Option<Value> {
+        let i = self.pos(key)?;
+        let (_, v) = self.entries.remove(i);
+        self.reindex();
+        Some(v)
+    }
+
+    fn reindex(&mut self) {
+        self.index.clear();
+        for (i, (k, _)) in self.entries.iter().enumerate() {
+            if let Some(mk) = map_key(k) {
+                self.index.insert(mk, i);
+            }
+        }
+    }
+
+    fn keys(&self) -> Vec<Value> {
+        self.entries.iter().map(|(k, _)| k.clone()).collect()
+    }
+
+    fn values(&self) -> Vec<Value> {
+        self.entries.iter().map(|(_, v)| v.clone()).collect()
+    }
+
+    // Ordered (k, v) pairs, for iteration / printing / json. Insertion order.
+    pub fn pairs(&self) -> &[(Value, Value)] {
+        &self.entries
+    }
+}
+
+// Build a LumenMap from ordered pairs (later duplicate keys overwrite earlier,
+// matching map-literal semantics). Public so builtins (json.parse) can build maps.
+pub fn lumen_map(pairs: Vec<(Value, Value)>) -> Rc<RefCell<LumenMap>> {
+    let mut m = LumenMap::default();
+    for (k, v) in pairs {
+        m.set(k, v);
+    }
+    Rc::new(RefCell::new(m))
+}
+
 #[derive(Clone)]
 pub enum Value {
     Int(i64),
@@ -17,7 +137,7 @@ pub enum Value {
     Bool(bool),
     Nil,
     List(Rc<RefCell<Vec<Value>>>),
-    Map(Rc<RefCell<Vec<(Value, Value)>>>),
+    Map(Rc<RefCell<LumenMap>>),
 
     Func(Rc<FnDef>, Rc<Vec<Value>>),
     Struct {
@@ -51,6 +171,7 @@ impl fmt::Display for Value {
             Value::Map(entries) => {
                 let entries = entries.borrow();
                 let parts: Vec<String> = entries
+                    .pairs()
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k.repr(), v.repr()))
                     .collect();
@@ -304,12 +425,7 @@ impl Interp {
                                 b[idx] = v;
                             }
                             (Value::Map(entries), key) => {
-                                let mut b = entries.borrow_mut();
-                                if let Some(slot) = b.iter_mut().find(|(k, _)| values_eq(k, &key)) {
-                                    slot.1 = v;
-                                } else {
-                                    b.push((key, v));
-                                }
+                                entries.borrow_mut().set(key, v);
                             }
                             _ => return Err("bad index assignment".into()),
                         }
@@ -440,9 +556,7 @@ impl Interp {
                 match v {
                     Value::List(items) => Ok(items.borrow().clone()),
 
-                    Value::Map(entries) => {
-                        Ok(entries.borrow().iter().map(|(k, _)| k.clone()).collect())
-                    }
+                    Value::Map(entries) => Ok(entries.borrow().keys()),
 
                     Value::Str(s) => Ok(s
                         .as_bytes()
@@ -476,7 +590,7 @@ impl Interp {
             }
             Expr::Int(n) => Ok(Value::Int(wrap48(*n))),
             Expr::Float(x) => Ok(Value::Float(*x)),
-            Expr::Str(s) => Ok(Value::Str(Rc::new(s.clone()))),
+            Expr::Str(s) => Ok(Value::Str(s.clone())),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Nil => Ok(Value::Nil),
             Expr::SelfExpr => env
@@ -519,14 +633,9 @@ impl Interp {
                 for (k, v) in entries {
                     let kv = self.eval(k, env)?;
                     let vv = self.eval(v, env)?;
-
-                    if let Some(slot) = pairs.iter_mut().find(|(ek, _)| values_eq(ek, &kv)) {
-                        slot.1 = vv;
-                    } else {
-                        pairs.push((kv, vv));
-                    }
+                    pairs.push((kv, vv));
                 }
-                Ok(Value::Map(Rc::new(RefCell::new(pairs))))
+                Ok(Value::Map(lumen_map(pairs)))
             }
             Expr::Range { .. } => {
                 let items = self.eval_iter(e, env)?;
@@ -619,13 +728,10 @@ impl Interp {
                         .nth(idx as usize)
                         .map(|c| Value::Str(Rc::new(c.to_string())))
                         .ok_or_else(|| "index out of range".into()),
-                    (Value::Map(entries), key) => {
-                        let b = entries.borrow();
-                        b.iter()
-                            .find(|(k, _)| values_eq(k, &key))
-                            .map(|(_, v)| v.clone())
-                            .ok_or_else(|| format!("key not found: {}", key.repr()))
-                    }
+                    (Value::Map(entries), key) => entries
+                        .borrow()
+                        .get(&key)
+                        .ok_or_else(|| format!("key not found: {}", key.repr())),
                     _ => Err("bad index operation".into()),
                 }
             }
@@ -773,33 +879,24 @@ impl Interp {
                     match name.as_str() {
                         "len" => return Ok(Value::Int(entries.borrow().len() as i64)),
                         "keys" => {
-                            let ks: Vec<Value> =
-                                entries.borrow().iter().map(|(k, _)| k.clone()).collect();
+                            let ks = entries.borrow().keys();
                             return Ok(Value::List(Rc::new(RefCell::new(ks))));
                         }
                         "values" => {
-                            let vs: Vec<Value> =
-                                entries.borrow().iter().map(|(_, v)| v.clone()).collect();
+                            let vs = entries.borrow().values();
                             return Ok(Value::List(Rc::new(RefCell::new(vs))));
                         }
                         "has" => {
                             let key = self.eval(&args[0], env)?;
-                            let found = entries.borrow().iter().any(|(k, _)| values_eq(k, &key));
-                            return Ok(Value::Bool(found));
+                            return Ok(Value::Bool(entries.borrow().has(&key)));
                         }
                         "contains" => {
                             let key = self.eval(&args[0], env)?;
-                            let found = entries.borrow().iter().any(|(k, _)| values_eq(k, &key));
-                            return Ok(Value::Bool(found));
+                            return Ok(Value::Bool(entries.borrow().has(&key)));
                         }
                         "get" => {
-
                             let key = self.eval(&args[0], env)?;
-                            let hit = entries
-                                .borrow()
-                                .iter()
-                                .find(|(k, _)| values_eq(k, &key))
-                                .map(|(_, v)| v.clone());
+                            let hit = entries.borrow().get(&key);
                             return match hit {
                                 Some(v) => Ok(v),
                                 None => {
@@ -813,12 +910,8 @@ impl Interp {
                         }
                         "remove" => {
                             let key = self.eval(&args[0], env)?;
-                            let mut b = entries.borrow_mut();
-                            if let Some(pos) = b.iter().position(|(k, _)| values_eq(k, &key)) {
-                                let (_, v) = b.remove(pos);
-                                return Ok(v);
-                            }
-                            return Ok(Value::Nil);
+                            let removed = entries.borrow_mut().remove(&key);
+                            return Ok(removed.unwrap_or(Value::Nil));
                         }
                         _ => {}
                     }
@@ -1315,7 +1408,7 @@ impl Interp {
     fn value_in(&self, x: &Value, container: &Value) -> Result<bool, String> {
         match container {
             Value::List(items) => Ok(items.borrow().iter().any(|e| values_eq(e, x))),
-            Value::Map(entries) => Ok(entries.borrow().iter().any(|(k, _)| values_eq(k, x))),
+            Value::Map(entries) => Ok(entries.borrow().has(x)),
             Value::Str(hay) => match x {
                 Value::Str(needle) => Ok(hay.contains(needle.as_str())),
                 _ => Err("'in' on a string requires a string on the left".into()),

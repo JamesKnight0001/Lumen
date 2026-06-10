@@ -19,6 +19,7 @@ definition.
 ```
 lumen build hello.lm                 # produces hello.exe next to the source
 lumen build hello.lm -o myapp.exe    # choose the output name
+lumen build hello.lm --native        # tune for THIS machine's CPU (see below)
 ./myapp.exe
 ```
 
@@ -26,6 +27,24 @@ lumen build hello.lm -o myapp.exe    # choose the output name
 link, and gives you a standalone native executable. No runtime to install, no
 bytecode, just an `.exe`. This is what you ship, and what the
 [benchmarks](performance.md) measure.
+
+### Tuning the optimizer (`--native`, `LUMEN_CC_OPT`)
+
+By default the final GCC step runs at `-O3 -flto`, which is portable: the binary
+runs on any x86-64 CPU. Two knobs let you trade that off:
+
+- `--native` (or `LUMEN_MARCH=native`) adds `-march=native`, letting GCC use your
+  exact CPU's instruction set. It speeds up code that leans on the runtime
+  (maps, strings, GC) - measurably so - but the resulting binary may not run on
+  an older CPU, so it's opt-in, not the default. It does little for, and can even
+  marginally slow, tight numeric loops, whose hot code is Lumen-emitted assembly
+  that `-march` doesn't touch.
+- `LUMEN_CC_OPT` replaces the optimizer string outright, for when you want
+  something specific: `LUMEN_CC_OPT="-O2"` or `LUMEN_CC_OPT="-O0 -g"` for a fast
+  debug build.
+
+Neither knob changes what your program *prints* - only how fast it runs. The
+interpreter/native byte-identical contract holds across all of them.
 
 ### Finding the C toolchain (you don't have to set PATH)
 
@@ -52,7 +71,7 @@ lumen doctor
 ```
 
 ```
-Lumen 0.73.0 - toolchain check
+Lumen 0.77.0 - toolchain check
 
   gcc      found    C:\msys64\mingw64\bin\gcc.exe  (via auto-detected)
   windres  found    C:\msys64\mingw64\bin\windres.exe  (via auto-detected)  [optional, for --icon]

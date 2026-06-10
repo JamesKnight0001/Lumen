@@ -1,0 +1,9 @@
+# Relative imports: a leading dot anchors to THIS file's directory, and each
+# extra dot climbs one parent. This entry imports a child package; that child
+# reaches back up to a shared sibling with `..`.
+import .pkg.api
+
+fn main():
+    print(api.greet("Lumen"))      # Hello, Lumen! (v2)
+    print(api.bump(41))            # 42
+    print(api.tagged("id"))        # idx2

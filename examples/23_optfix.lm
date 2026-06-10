@@ -1,0 +1,16 @@
+# Optimizer fixpoint (S5): nested inline+fold collapses fully across rounds.
+# double(double(k())) must reduce to a constant, not leave runtime calls.
+fn k() -> i64:
+    return 10
+
+fn double(x: i64) -> i64:
+    return x + x
+
+fn inc(x: i64) -> i64:
+    return x + 1
+
+fn main():
+    print(double(k()))            # 20
+    print(double(double(k())))    # 40
+    print(inc(double(k())))       # 21
+    print(double(inc(inc(k()))))  # 24

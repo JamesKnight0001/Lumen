@@ -7,7 +7,22 @@
 use crate::ast::*;
 
 pub fn optimize_program(prog: &mut Program) {
+    // Run the pass pipeline to a fixpoint: folds expose new inlines, inlines
+    // expose new folds/CSE. One pass leaves some on the table. Cap rounds so a
+    // pathological input can't loop forever; in practice it converges in 2-3.
+    // Convergence is detected by a structural fingerprint (Debug) of the program;
+    // each pass is already semantics-preserving, so iterating can't change meaning.
+    const MAX_ROUNDS: usize = 5;
+    for _ in 0..MAX_ROUNDS {
+        let before = format!("{prog:?}");
+        opt_round(prog);
+        if format!("{prog:?}") == before {
+            break;
+        }
+    }
+}
 
+fn opt_round(prog: &mut Program) {
     inline_program(prog);
     for item in prog.iter_mut() {
         match item {
@@ -784,7 +799,7 @@ fn fold_binary(op: BinOp, lhs: &Expr, rhs: &Expr) -> Option<Expr> {
             Some(Float(a % b))
         }
 
-        (Add, Str(a), Str(b)) => Some(Str(format!("{}{}", a, b))),
+        (Add, Str(a), Str(b)) => Some(Str(std::rc::Rc::new(format!("{}{}", a, b)))),
 
         (Eq, _, _) => lit_eq(lhs, rhs).map(Bool),
         (Ne, _, _) => lit_eq(lhs, rhs).map(|b| Bool(!b)),

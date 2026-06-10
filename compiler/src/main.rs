@@ -175,6 +175,7 @@ fn build(prog: &ast::Program, file: &str, src: &str, args: &[String]) {
         Path::new(file).file_stem().unwrap().to_string_lossy()
     );
     let mut icon: Option<String> = None;
+    let mut native = false; // --native: add -march=native (non-portable, this box)
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -185,6 +186,10 @@ fn build(prog: &ast::Program, file: &str, src: &str, args: &[String]) {
             "--icon" if i + 1 < args.len() => {
                 icon = Some(args[i + 1].clone());
                 i += 2;
+            }
+            "--native" => {
+                native = true;
+                i += 1;
             }
             other => {
                 eprintln!("warning: ignoring unknown build flag '{other}'");
@@ -213,8 +218,18 @@ fn build(prog: &ast::Program, file: &str, src: &str, args: &[String]) {
     let mut cmd = Command::new(&cc.program);
     // Put gcc's own bin on the child PATH so it finds its as/ld.
     prepend_path(&mut cmd, cc.bin_dir.as_deref());
+    // Opt level: -O3 -flto by default; LUMEN_CC_OPT overrides (e.g. "-O2" or
+    // "-O0 -g"). --native or LUMEN_MARCH=native adds -march=native, which bakes
+    // in this box's ISA (faster, non-portable), so it stays opt-in.
+    let opt = std::env::var("LUMEN_CC_OPT").unwrap_or_else(|_| "-O3 -flto".into());
+    let want_native = native || std::env::var("LUMEN_MARCH").as_deref() == Ok("native");
+    for f in opt.split_whitespace() {
+        cmd.arg(f);
+    }
+    if want_native {
+        cmd.arg("-march=native");
+    }
     cmd.args([
-        "-O2",
         "-s",
         "-ffunction-sections",
         "-fdata-sections",
@@ -510,7 +525,7 @@ fn print_usage() {
     );
     eprintln!("USAGE:");
     eprintln!("  lumen run    <file.lm>               run via the Tier-0 interpreter");
-    eprintln!("  lumen build  <file.lm> [-o out.exe] [--icon <p>]  compile to a native .exe");
+    eprintln!("  lumen build  <file.lm> [-o out.exe] [--icon <p>] [--native]  compile to a native .exe");
     eprintln!("  lumen -c     \"<source>\"               run inline source");
     eprintln!("  lumen new    <name>                  scaffold a new project directory");
     eprintln!("  lumen init                           scaffold a project in the cwd");

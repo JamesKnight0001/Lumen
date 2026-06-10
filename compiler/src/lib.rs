@@ -9,6 +9,7 @@
 pub mod ast;
 pub mod builtins;
 pub mod codegen;
+pub mod defaults;
 pub mod desugar;
 #[cfg(windows)]
 pub mod ffi;
@@ -80,6 +81,7 @@ pub fn compile(src: &str, base_dir: &Path, optimize: bool) -> Result<ast::Progra
     imports::collect(
         &program,
         base_dir,
+        base_dir,
         &mut visited,
         &mut imported,
         &mut aliases,
@@ -91,6 +93,7 @@ pub fn compile(src: &str, base_dir: &Path, optimize: bool) -> Result<ast::Progra
         program = imported;
     }
 
+    defaults::expand_program(&mut program)?;
     desugar::desugar_program(&mut program);
     lift::lift_program(&mut program);
     if optimize {

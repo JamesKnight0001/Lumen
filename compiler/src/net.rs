@@ -8,7 +8,6 @@
 //! returns a map {data, host, port}.
 
 use crate::interp::Value;
-use std::cell::RefCell;
 use std::rc::Rc;
 
 fn ival(v: &Value) -> i64 {
@@ -332,7 +331,7 @@ pub fn recvfrom(a: &[Value]) -> Result<Value, String> {
             (sv("host".into()), sv(ip_string(from.addr))),
             (sv("port".into()), Value::Int(ntohs(from.port) as i64)),
         ];
-        Ok(Value::Map(Rc::new(RefCell::new(e))))
+        Ok(Value::Map(crate::interp::lumen_map(e)))
     }
 }
 

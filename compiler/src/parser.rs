@@ -184,6 +184,7 @@ impl Parser {
                     params.push(Param {
                         name: "self".into(),
                         ty: Type::Named("Self".into()),
+                        default: None,
                     });
                 } else {
                     let (name, nidx) = self.ident_idx()?;
@@ -194,7 +195,14 @@ impl Parser {
                     } else {
                         Type::Unknown
                     };
-                    params.push(Param { name, ty });
+                    // Optional default value: `name = expr`. Makes the arg
+                    // omittable at call sites (defaults pad trailing args).
+                    let default = if self.eat(&Tok::Assign) {
+                        Some(self.parse_expr()?)
+                    } else {
+                        None
+                    };
+                    params.push(Param { name, ty, default });
                 }
                 if !self.comma_continues(&Tok::RParen) {
                     break;
@@ -369,7 +377,12 @@ impl Parser {
 
     fn parse_import(&mut self) -> PResult<ImportDef> {
         if self.eat(&Tok::From) {
-            let module = self.dotted_module()?;
+            let level = self.leading_dots();
+            let module = if level > 0 && !self.check_ident() {
+                String::new() // `from .. import x` - dir itself, no module seg
+            } else {
+                self.dotted_module()?
+            };
             self.expect(&Tok::Import)?;
             let mut names = Vec::new();
             loop {
@@ -384,9 +397,11 @@ impl Parser {
                 module,
                 alias: None,
                 names,
+                level,
             })
         } else {
             self.expect(&Tok::Import)?;
+            let level = self.leading_dots();
             let midx = self.pos;
             let module = self.dotted_module()?;
             // Anchor the span to the first segment's token (clean single-token
@@ -402,8 +417,29 @@ impl Parser {
                 module,
                 alias,
                 names: Vec::new(),
+                level,
             })
         }
+    }
+
+    // Count + consume leading dots of a relative import. The lexer packs dots as
+    // DotDot (2) and Dot (1), so `...x` is DotDot+Dot = level 3.
+    fn leading_dots(&mut self) -> u8 {
+        let mut n = 0u8;
+        loop {
+            if self.eat(&Tok::DotDot) {
+                n += 2;
+            } else if self.eat(&Tok::Dot) {
+                n += 1;
+            } else {
+                break;
+            }
+        }
+        n
+    }
+
+    fn check_ident(&self) -> bool {
+        self.pos < self.toks.len() && matches!(&self.toks[self.pos].tok, Tok::Ident(_))
     }
 
     fn dotted_module(&mut self) -> PResult<String> {
@@ -840,7 +876,7 @@ impl Parser {
         match self.advance() {
             Tok::Int(n) => Ok(Expr::Int(n)),
             Tok::Float(f) => Ok(Expr::Float(f)),
-            Tok::Str(s) => Ok(Expr::Str(s)),
+            Tok::Str(s) => Ok(Expr::Str(std::rc::Rc::new(s))),
             Tok::FStr(s) => Ok(Expr::FStr(parse_fstring(&s))),
             Tok::True => Ok(Expr::Bool(true)),
             Tok::False => Ok(Expr::Bool(false)),
@@ -1108,5 +1144,41 @@ mod tests {
                 "should accept valid stmt end: {src:?}"
             );
         }
+    }
+
+    // Leading dots on an import set the relative `level`: 0 = absolute, 1 = .x,
+    // 2 = ..x, 3 = ...pkg.x. `from .x import y` carries level too.
+    #[test]
+    fn import_levels() {
+        let cases = [
+            ("import foo\n", 0u8, "foo"),
+            ("import .foo\n", 1, "foo"),
+            ("import ..foo\n", 2, "foo"),
+            ("import ...pkg.foo\n", 3, "pkg.foo"),
+            ("from .foo import bar\n", 1, "foo"),
+            ("from ..pkg.foo import bar\n", 2, "pkg.foo"),
+        ];
+        for (src, lvl, module) in cases {
+            let prog = crate::parse_program(src).unwrap();
+            let imp = prog.iter().find_map(|it| match it {
+                crate::ast::Item::Import(i) => Some(i),
+                _ => None,
+            }).expect("an import");
+            assert_eq!(imp.level, lvl, "level for {src:?}");
+            assert_eq!(imp.module, module, "module for {src:?}");
+        }
+    }
+
+    // A param's `= expr` is recorded as its default; bare params have none.
+    #[test]
+    fn param_defaults() {
+        let prog = crate::parse_program("fn f(a, b=10, c=\"x\"):\n    return a\n").unwrap();
+        let f = prog.iter().find_map(|it| match it {
+            crate::ast::Item::Fn(f) => Some(f),
+            _ => None,
+        }).expect("a fn");
+        assert!(f.params[0].default.is_none(), "a has no default");
+        assert!(f.params[1].default.is_some(), "b has a default");
+        assert!(f.params[2].default.is_some(), "c has a default");
     }
 }

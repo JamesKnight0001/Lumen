@@ -1,0 +1,29 @@
+# Numeric map keys: an int and a whole-valued float are the SAME key (1 == 1.0),
+# matching `==` and the native backend. Non-whole floats are distinct keys.
+# Guards the interp/native byte-identical contract for mixed numeric keys.
+
+fn main():
+    # whole float overwrites the int key, keeping its original slot
+    let m = {}
+    m[1] = "a"
+    m[2] = "b"
+    m[1.0] = "c"
+    print(m)            # {1: "c", 2: "b"}
+    print(len(m))       # 2
+
+    # lookup crosses int/float freely
+    print(m[1])         # c
+    print(m[1.0])       # c
+    print(m.has(2.0))   # true
+
+    # non-whole floats are their own keys
+    let f = {}
+    f[1.5] = "x"
+    f[1.5] = "y"
+    print(f[1.5])       # y
+    print(len(f))       # 1
+
+    # negative zero equals zero
+    let z = {}
+    z[0] = "ok"
+    print(z[-0.0])      # ok

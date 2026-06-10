@@ -1,4 +1,4 @@
- # Lumen - BETA V0.74.0
+ # Lumen - BETA V0.77.0
 
 A small, fast language with Python-like syntax and a Lua-sized core.
 
@@ -25,7 +25,7 @@ fn main():
 ```
 
 ## Version
-Compiler: V0.74.0
+Compiler: V0.77.0
 
 # Install using Installer:
 [Lumen installer](https://github.com/JamesKnight0001/Lumen_installer)
@@ -83,7 +83,8 @@ lumen -c 'fn main(): print(2 ** 10)'
 * Functions, closures, recursion
 * Structs and methods (`impl`)
 * `if`, `while`, `for`, `break`, `continue`
-* Modules and imports
+* Modules and imports - including relative imports (`.mod` / `..mod`)
+* Default function arguments
 * f-strings
 * Native C FFI via `extern`
 * TCP/UDP sockets (`net`) and a package manager (`lumen install`, `lumen venv`)
@@ -97,28 +98,61 @@ source
   → lexer
   → parser
   → import resolver
-  → optimizer
-  → type analysis
+  → optimizer (runs to a fixpoint)
+  → type analysis (proves int / float / int-list / float-list)
       ├─ interpreter
       └─ x86-64 code generator
 ```
 
-Both execution modes consume the same lowered AST. A differential test suite verifies that interpreted and compiled programs produce identical output.
+Both execution modes consume the same lowered AST. A differential test suite
+verifies that interpreted and compiled programs produce identical output, down
+to the byte.
 
 ## Performance
 
-Compiled Lumen code is designed to be competitive with C on numeric workloads and substantially faster than typical interpreted languages. Values are NaN-boxed, and proven integer/float values can remain unboxed in generated machine code.
+Compiled Lumen is built to meet C on the hot numeric path and to beat every
+managed language (Java, Node, CPython) across the board. Values are NaN-boxed,
+and the compiler proves which locals, parameters, and list elements are always
+integers or always floats so they stay **unboxed** in the generated machine
+code. Reduction accumulators and loop counters are promoted into registers.
+
+Measured on this machine (Windows, mingw64 gcc 15.2, rustc 1.96, Java 25,
+Node 24, Python 3.12); medians, warmup discarded; every program's output is
+byte-identical across languages:
+
+| Workload | Lumen 0.77 | C `-O2` | Rust `-O` | Node | Python |
+|----------|-----------|---------|-----------|------|--------|
+| `fib(34)` recursion | **~32 ms** | ~15 ms | ~21 ms | ~117 ms | ~1132 ms |
+| collatz (data-dependent scalar) | **~139 ms** | ~52 ms | ~35 ms | ~282 ms | ~3220 ms |
+| int-list sum, 100M reads | **~225 ms** | ~21 ms* | ~15 ms* | ~182 ms | ~8975 ms |
+
+Read those honestly. On fair scalar code Lumen lands ~2–2.7× off C and clearly
+ahead of Node (2–4×) and Python (20–35×). The asterisks matter: on the int-list
+sum, gcc/rustc *auto-vectorize* (SIMD) and on simpler reductions they delete the
+loop entirely via constant-folding - that's the compiler removing the work, not
+the language being faster at it. Lumen emits honest scalar code and still beats
+every interpreter. The full story, methodology, and per-release deltas are in
+[`docs/lumen/performance.md`](docs/lumen/performance.md).
 
 ## Status
 
 Current features include:
 
 * Native x86-64 code generation
-* Garbage collection
+* Generational mark/sweep garbage collection
 * Closures
-* Modules
+* Modules, relative imports, default arguments
 * C FFI (including Win32/COM usage)
 * Standard library
+
+Recent performance work (0.76–0.77):
+
+* **S3** - int-list `a[i]` reads compile to an inline unboxed load (**+60%** on
+  int-list-heavy loops)
+* **S5** - the optimizer now runs inline→fold→CSE→DCE to a fixpoint
+* **S7** - interpreter interns string literals (**+21%** on literal-heavy loops)
+* **S10** - int reduction accumulators are promoted to registers in `for` loops
+  (**+23%** on accumulator loops)
 
 Current limitations:
 
@@ -126,6 +160,7 @@ Current limitations:
 * 48-bit wrapping integers
 * No incremental compilation
 * Imported modules share a global namespace
+* No auto-vectorizer (the main remaining gap to C on reducible loops)
 
 ## Documentation
 

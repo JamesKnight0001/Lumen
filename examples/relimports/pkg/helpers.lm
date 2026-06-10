@@ -1,0 +1,6 @@
+# Sibling helper inside pkg/.
+fn banner(name):
+    return "Hello, " + name + "!"
+
+fn inc(n):
+    return n + 1

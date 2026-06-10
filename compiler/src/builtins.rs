@@ -245,7 +245,7 @@ fn json_write(v: &Value, out: &mut String) {
         }
         Value::Map(entries) => {
             out.push('{');
-            for (i, (k, val)) in entries.borrow().iter().enumerate() {
+            for (i, (k, val)) in entries.borrow().pairs().iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
@@ -413,11 +413,11 @@ fn parse_arr(b: &[u8], pos: &mut usize) -> Option<Value> {
 
 fn parse_obj(b: &[u8], pos: &mut usize) -> Option<Value> {
     *pos += 1;
-    let entries: std::rc::Rc<std::cell::RefCell<Vec<(Value, Value)>>> = Default::default();
+    let mut pairs: Vec<(Value, Value)> = Vec::new();
     json_skip_ws(b, pos);
     if *pos < b.len() && b[*pos] == b'}' {
         *pos += 1;
-        return Some(Value::Map(entries));
+        return Some(Value::Map(crate::interp::lumen_map(pairs)));
     }
     loop {
         json_skip_ws(b, pos);
@@ -431,20 +431,8 @@ fn parse_obj(b: &[u8], pos: &mut usize) -> Option<Value> {
         }
         *pos += 1;
         let val = json_parse_value(b, pos)?;
-
-        let kv = Value::Str(std::rc::Rc::new(key));
-        {
-            let mut e = entries.borrow_mut();
-            let found = e.iter().position(|(k, _)| match (k, &kv) {
-                (Value::Str(a), Value::Str(c)) => a == c,
-                _ => false,
-            });
-            if let Some(idx) = found {
-                e[idx].1 = val;
-            } else {
-                e.push((kv, val));
-            }
-        }
+        // lumen_map dedups by key (last wins), matching object semantics.
+        pairs.push((Value::Str(std::rc::Rc::new(key)), val));
         json_skip_ws(b, pos);
         if *pos >= b.len() {
             return None;
@@ -460,7 +448,7 @@ fn parse_obj(b: &[u8], pos: &mut usize) -> Option<Value> {
             _ => return None,
         }
     }
-    Some(Value::Map(entries))
+    Some(Value::Map(crate::interp::lumen_map(pairs)))
 }
 
 // The registry. Order doesn't matter; lookup is a linear scan. Each entry's
