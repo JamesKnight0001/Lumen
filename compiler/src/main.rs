@@ -165,6 +165,17 @@ fn main() {
 }
 
 fn build(prog: &ast::Program, file: &str, src: &str, args: &[String]) {
+    // Backend selector: LUMEN_BACKEND=llvm (or --backend llvm) emits LLVM IR and
+    // links with clang+lld; default stays the asm+gcc path during bring-up.
+    let want_llvm = std::env::var("LUMEN_BACKEND").as_deref() == Ok("llvm")
+        || args.iter().any(|a| a == "--backend=llvm")
+        || args
+            .windows(2)
+            .any(|w| w[0] == "--backend" && w[1] == "llvm");
+    if want_llvm {
+        return build_llvm(prog, file, src, args);
+    }
+
     let asm = match codegen::Codegen::new().generate(prog) {
         Ok(a) => a,
         Err(e) => fatal_pretty("compile", &e, src),
@@ -272,6 +283,74 @@ fn prepend_path(cmd: &mut Command, dir: Option<&Path>) {
     }
     if let Ok(joined) = std::env::join_paths(paths) {
         cmd.env("PATH", joined);
+    }
+}
+
+fn build_llvm(prog: &ast::Program, _file: &str, src: &str, args: &[String]) {
+    let ll = match lumenc::llvmgen::LlvmGen::new().generate(prog) {
+        Ok(s) => s,
+        Err(e) => fatal_pretty("compile", &e, src),
+    };
+
+    // parse -o out / default name from args (reuse the same shape as build)
+    let mut out = String::from("a.exe");
+    let mut i = 3;
+    while i < args.len() {
+        if args[i] == "-o" && i + 1 < args.len() {
+            out = args[i + 1].clone();
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    if out == "a.exe" {
+        out = format!(
+            "{}.exe",
+            Path::new(_file).file_stem().unwrap().to_string_lossy()
+        );
+    }
+
+    let stem = out.trim_end_matches(".exe");
+    let ll_path = format!("{stem}.ll");
+    if let Err(e) = std::fs::write(&ll_path, &ll) {
+        fatal(&format!("error writing ir: {e}"));
+    }
+    let rt_path = format!("{stem}_rt.c");
+    if let Err(e) = std::fs::write(&rt_path, LUMEN_RUNTIME) {
+        fatal(&format!("error writing runtime: {e}"));
+    }
+
+    // clang drives the whole chain: .ll -> .o, the C runtime -> .o, link via lld.
+    let clang = lumenc::llvm::find_clang()
+        .unwrap_or_else(|| fatal(&format!("error: {}", lumenc::llvm::install_hint())));
+    let opt = std::env::var("LUMEN_LLVM_OPT").unwrap_or_else(|_| "-O2".into());
+    let mut cmd = Command::new(&clang.program);
+    prepend_path(&mut cmd, clang.bin_dir.as_deref());
+    for f in opt.split_whitespace() {
+        cmd.arg(f);
+    }
+    cmd.args([
+        "-fuse-ld=lld",
+        "-Wno-override-module",
+        "-o",
+        &out,
+        &ll_path,
+        &rt_path,
+        "-lm",
+        "-lws2_32",
+    ]);
+    for lib in collect_extlibs(prog) {
+        cmd.arg(format!("-l{lib}"));
+    }
+    match cmd.status() {
+        Ok(s) if s.success() => {
+            let _ = std::fs::remove_file(&rt_path);
+            println!("built {out}  (llvm ir: {ll_path})");
+        }
+        Ok(s) => fatal(&format!("clang/lld failed with status {:?}", s.code())),
+        Err(e) => fatal(&format!(
+            "could not run clang (is the LLVM toolchain installed?): {e}"
+        )),
     }
 }
 
@@ -414,7 +493,6 @@ fn fatal(msg: &str) -> ! {
 }
 
 fn fatal_pretty(kind: &str, msg: &str, src: &str) -> ! {
-
     let (headline, line_no) = match extract_line_no(msg) {
         Some(n) => {
             let trimmed = msg
@@ -525,7 +603,9 @@ fn print_usage() {
     );
     eprintln!("USAGE:");
     eprintln!("  lumen run    <file.lm>               run via the Tier-0 interpreter");
-    eprintln!("  lumen build  <file.lm> [-o out.exe] [--icon <p>] [--native]  compile to a native .exe");
+    eprintln!(
+        "  lumen build  <file.lm> [-o out.exe] [--icon <p>] [--native]  compile to a native .exe"
+    );
     eprintln!("  lumen -c     \"<source>\"               run inline source");
     eprintln!("  lumen new    <name>                  scaffold a new project directory");
     eprintln!("  lumen init                           scaffold a project in the cwd");
@@ -535,10 +615,14 @@ fn print_usage() {
     eprintln!("  lumen venv   <dir>                   create an isolated package environment");
     eprintln!("  lumen update                         download + install a newer compiler (LUMEN_UPDATE_URL=owner/repo)");
     eprintln!("  lumen repl                           interactive read-eval-print loop");
-    eprintln!("  lumen doctor                         check the native-build toolchain (gcc, windres)");
+    eprintln!(
+        "  lumen doctor                         check the native-build toolchain (gcc, windres)"
+    );
     eprintln!("  lumen tokens <file.lm>               dump tokens (debug)");
     eprintln!("  lumen ast    <file.lm>               dump the AST (debug)");
-    eprintln!("  lumen decls  <file.lm>               dump declaration name spans as TSV (tooling)");
+    eprintln!(
+        "  lumen decls  <file.lm>               dump declaration name spans as TSV (tooling)"
+    );
     eprintln!("  lumen version                        print the version");
 }
 

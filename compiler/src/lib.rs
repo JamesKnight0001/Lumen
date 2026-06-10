@@ -1,4 +1,3 @@
-
 //! Crate root for the Lumen compiler. Wires the front end together: lex,
 //! parse, resolve imports, desugar, lambda-lift, then optionally optimize.
 //! `compile` is the one entry point both backends (interp, codegen) consume.
@@ -18,6 +17,8 @@ pub mod imports;
 pub mod interp;
 pub mod lexer;
 pub mod lift;
+pub mod llvm;
+pub mod llvmgen;
 pub mod mir;
 pub mod net;
 pub mod opt;
@@ -30,7 +31,6 @@ use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub enum CompileError {
-
     Lex(String),
 
     Parse(String),
