@@ -145,24 +145,16 @@ Current features include:
 * C FFI (including Win32/COM usage)
 * Standard library
 
-Recent performance work (0.76-0.78):
-
-* **S3** - int-list `a[i]` reads compile to an inline unboxed load (**+60%** on
-  int-list-heavy loops)
-* **S5** - the optimizer now runs inline→fold→CSE→DCE to a fixpoint
-* **S7** - interpreter interns string literals (**+21%** on literal-heavy loops)
-* **S10** - int reduction accumulators are promoted to registers in `for` loops
-  (**+23%** on accumulator loops)
-* **S11** - `x % 2^k` compiles to a sign-correct mask instead of a divide
-  (**+19%** on modulo-heavy loops like collatz)
-
-Current limitations:
+Current limitations (Soon to fix, with LLVM):
 
 * x86-64 only
 * 48-bit wrapping integers
 * No incremental compilation
 * Imported modules share a global namespace
 * No auto-vectorizer (the main remaining gap to C on reducible loops)
+
+## MERGES
+* I WILL KEEP ON CONTNUING TO MERGE THE CODEBASE, AS BASES UNTIL REACHING V1.0.0 (RELEASE)
 
 ## Documentation
 
