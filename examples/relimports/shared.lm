@@ -1,0 +1,2 @@
+# Shared module at the example root. Children reach it with `..`.
+fn version(): return 2

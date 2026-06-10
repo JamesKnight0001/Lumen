@@ -1,0 +1,4 @@
+/target
+*.exe
+*.s
+!examples/*.lm

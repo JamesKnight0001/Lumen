@@ -1,0 +1,47 @@
+# net module: TCP + UDP sockets via Winsock2. A socket is an int handle
+# (-1 = error). All loopback here, so output is deterministic. Port 0 lets the
+# OS pick a free port, which we read back with net.local_port - no hard-coded
+# ports, no clashes.
+
+import net
+
+fn main():
+    # --- TCP loopback. On loopback connect() completes the handshake before we
+    # accept(), so a single thread can drive both ends. ---
+    let srv = net.listen("127.0.0.1", 0)
+    let port = net.local_port(srv)
+    let cli = net.connect("127.0.0.1", port)
+    net.set_opt(cli, "nodelay", 1)          # disable Nagle (advanced option)
+    let conn = net.accept(srv)
+
+    let sent = net.send(cli, "hello tcp")
+    print("tcp sent bytes: " + str(sent))           # tcp sent bytes: 9
+    let ev = net.poll(conn, 1000)                   # wait until readable
+    print("tcp readable: " + str(ev % 2 == 1))      # tcp readable: true
+    print("tcp recv: " + net.recv(conn, 1024))      # tcp recv: hello tcp
+
+    net.send(conn, "ack")
+    print("tcp reply: " + net.recv(cli, 1024))      # tcp reply: ack
+
+    net.shutdown(cli, 2)                            # 2 = SHUT_RDWR
+    net.close(cli)
+    net.close(conn)
+    net.close(srv)
+
+    # --- UDP loopback, with a receive timeout (advanced option) ---
+    let a = net.udp("127.0.0.1", 0)
+    let aport = net.local_port(a)
+    net.set_timeout(a, 200)                         # 200ms recv timeout
+    let empty = net.recvfrom(a, 1024)               # nothing sent -> times out
+    print("udp timeout nil: " + str(empty == nil))  # udp timeout nil: true
+
+    let b = net.udp("127.0.0.1", 0)
+    net.sendto(b, "ping udp", "127.0.0.1", aport)
+    let msg = net.recvfrom(a, 1024)
+    print("udp data: " + msg["data"])               # udp data: ping udp
+    print("udp from host: " + msg["host"])          # udp from host: 127.0.0.1
+    net.close(a)
+    net.close(b)
+
+    # --- name resolution ---
+    print("localhost -> " + net.resolve("localhost"))  # localhost -> 127.0.0.1

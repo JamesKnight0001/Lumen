@@ -1,0 +1,20 @@
+# Int-list unboxed read fast path (S3): build, push, index-read, index-store.
+# Native must inline the load+unbox and stay byte-identical to the interpreter.
+fn main():
+    let a = []
+    let i = 0
+    while i < 10:
+        a.push(i * i)
+        i = i + 1
+    # read back via index, sum
+    let s = 0
+    let k = 0
+    while k < 10:
+        s = s + a[k]
+        k = k + 1
+    print(s)            # 0+1+4+9+16+25+36+49+64+81 = 285
+    # index store then read
+    a[3] = 100
+    print(a[3])         # 100
+    print(a[0])         # 0
+    print(a[9])         # 81

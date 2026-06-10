@@ -1,0 +1,4 @@
+# Sibling reached by its ABSOLUTE path from inside pkg/. Before the root-anchor
+# fix this wrongly doubled to pkg/pkg/extra.lm.
+fn tag():
+    return "x2"

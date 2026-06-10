@@ -1,0 +1,19 @@
+# Power-of-two modulo: x % 2^k compiles to a mask, not a divide. Same result
+# for negatives (remainder follows the dividend's sign), proven byte-identical.
+fn main():
+    let evens = 0
+    let odds = 0
+    for i in 0..20:
+        if i % 2 == 0:
+            evens = evens + 1
+        else:
+            odds = odds + 1
+    print(evens)
+    print(odds)
+    print(-7 % 4)
+    print(-8 % 8)
+    print(255 % 16)
+    let acc = 0
+    for i in 0..1000:
+        acc = acc + (i % 64)
+    print(acc)

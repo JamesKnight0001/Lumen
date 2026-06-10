@@ -1,0 +1,19 @@
+# Default arguments: a param can carry `= value`, filled in when the caller
+# omits that trailing arg. Defaults can be any expression and are expanded at
+# the call site, so both backends behave identically.
+
+fn power(base, exp=2):
+    let r = 1
+    for _ in 0..exp:
+        r = r * base
+    return r
+
+fn join3(a, sep="-", tail="!"):
+    return a + sep + a + tail
+
+fn main():
+    print(power(5))             # 25   (exp defaults to 2)
+    print(power(2, 10))         # 1024
+    print(join3("x"))           # x-x!
+    print(join3("x", "+"))      # x+x!
+    print(join3("x", "+", "."))  # x+x.

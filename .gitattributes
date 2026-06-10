@@ -1,0 +1,6 @@
+# Lumen source files must stay LF: the lexer treats CR as an unexpected token.
+*.lm text eol=lf
+# Keep shell scripts and Rust/C source LF too for cross-platform consistency.
+*.sh text eol=lf
+*.rs text eol=lf
+*.c text eol=lf

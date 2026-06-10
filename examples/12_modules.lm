@@ -1,0 +1,13 @@
+# multi-file imports
+
+import greet
+import greet as g
+from greet import shout
+
+fn main():
+    print(greet.greeting("world"))   # Hello, world!
+    print(g.greeting("Ada"))  # Hello, Ada!
+    print(shout("ready"))  # READY!
+
+    let gr = greet.Greeter("Hi")
+    print(gr.say("Lumen"))           # Hi Lumen

@@ -1,0 +1,27 @@
+fn fact(n: i64) -> i64:
+    let p = 1
+    for k in 1..n + 1:
+        p = p * k
+    return p
+
+fn main():
+    let total = 0
+    let cnt = 0
+    for i in 0..20:
+        total = total + i * i
+        cnt = cnt + 1
+    print(total)          # sum i*i, i=0..19 = 2470
+    print(cnt)            # 20
+    # accumulator that survives a call in the body
+    let s = 0
+    for n in 1..7:
+        s = s + fact(n)
+    print(s)              # 1!+..+6! = 1+2+6+24+120+720 = 873
+    # two accumulators in one loop
+    let a = 0
+    let b = 1
+    for i in 1..11:
+        a = a + i
+        b = b * 2
+    print(a)              # 55
+    print(b)              # 2^10 = 1024

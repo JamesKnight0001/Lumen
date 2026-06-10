@@ -1,0 +1,28 @@
+[package]
+name = "lumenc"
+version = "0.78.0"
+edition = "2021"
+rust-version = "1.74"
+description = "The Lumen programming language: lexer, parser, tree-walking interpreter, and native x86-64 backend that produce byte-identical output."
+license = "MIT"
+readme = "../README.md"
+repository = "https://github.com/lumen-lang/lumen"
+homepage = "https://github.com/lumen-lang/lumen"
+keywords = ["compiler", "language", "interpreter", "codegen", "x86-64"]
+categories = ["compilers", "development-tools"]
+
+# The compiler is a library (front end + both backends) with a thin CLI on top,
+# so it can be embedded as well as used from the command line.
+[lib]
+name = "lumenc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lumen"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

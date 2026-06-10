@@ -1,0 +1,37 @@
+# FFI: COM vtable calls
+
+import cffi
+
+extern "C" from "ole32.dll":
+    fn CoInitialize(reserved: i64) -> i64
+extern "C" from "shell32.dll":
+    fn SHGetDesktopFolder(ppshf: i64) -> i64   # out-param: IShellFolder**
+
+fn main():
+    CoInitialize(0)
+
+    let out = cffi.cbuf(8)
+    let hr = SHGetDesktopFolder(out)
+    if hr != 0:
+        print("SHGetDesktopFolder failed")
+        return
+    let obj = cffi.get_ptr(out, 0)
+
+    let after_addref = cffi.vcall(obj, 1, nil, 0)
+    print("refcount went up on AddRef: " + str(after_addref >= 2))
+    let after_release = cffi.vcall(obj, 2, nil, 0)
+    print("refcount went down on Release: " + str(after_release < after_addref))
+
+    let iid = cffi.cbuf(16)
+    cffi.set_i32(iid, 8, 192)            # 0x000000C0
+    cffi.set_i32(iid, 12, 1174405120)    # 0x46000000
+    let ppv = cffi.cbuf(8)
+    let qargs = cffi.cbuf(16)
+    cffi.set_ptr(qargs, 0, cffi.addr(iid))
+    cffi.set_ptr(qargs, 8, cffi.addr(ppv))
+    let qhr = cffi.vcall(obj, 0, qargs, 0)
+    print("QueryInterface succeeded: " + str(qhr == 0 and cffi.get_ptr(ppv, 0) != 0))
+
+    cffi.vcall(cffi.get_ptr(ppv, 0), 2, nil, 0)
+    cffi.vcall(obj, 2, nil, 0)
+    print("done")

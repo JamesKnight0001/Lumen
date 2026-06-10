@@ -1,0 +1,21 @@
+# report formatting
+
+import lib.mathx
+import lib.strings
+
+struct Row:
+    label: str
+    value: f64
+
+impl Row:
+    fn render(self):
+        let v = strings.pad_left(str(self.value), 8)
+        return strings.pad_left(self.label, 10) + ": " + v
+
+fn powers_table(n):
+    let rows = []
+    let i = 1
+    while i <= n:
+        rows.push(Row(label: "sq " + str(i), value: mathx.square(i)))
+        i += 1
+    return rows
