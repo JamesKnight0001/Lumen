@@ -580,7 +580,7 @@ impl LlvmGen {
         let _ = writeln!(out, "  {boxed} = call i64 @lumen_from_int(i64 {curi})");
         let _ = writeln!(out, "  store i64 {boxed}, ptr {vslot}");
         // skip the GC poll when the body provably can't allocate (tight numeric loop)
-        if self.stmts_alloc(body, ctx) {
+        if self.stmts_alloc(body, ctx) || std::env::var("LUMEN_NO_POLLSKIP").is_ok() {
             self.gc_poll(out);
         }
         ctx.loops.push((cont.clone(), end.clone()));
@@ -659,7 +659,7 @@ impl LlvmGen {
         let el = self.vreg();
         let _ = writeln!(out, "  {el} = call i64 @lumen_list_get(i64 {l2}, i64 {i})");
         let _ = writeln!(out, "  store i64 {el}, ptr {vslot}");
-        if self.stmts_alloc(body, ctx) {
+        if self.stmts_alloc(body, ctx) || std::env::var("LUMEN_NO_POLLSKIP").is_ok() {
             self.gc_poll(out);
         }
         ctx.loops.push((cont.clone(), end.clone()));
@@ -1137,7 +1137,7 @@ impl LlvmGen {
         // fast path: a proven int/float comparison feeding a branch -> emit the
         // icmp/fcmp i1 directly, skipping the lumen_bool box + lumen_truthy unbox
         // round-trip. Big win for if/while conditions (e.g. fib's `n < 2`).
-        if !ctx.has_try {
+        if !ctx.has_try && !unbox_off() {
             if let Expr::Binary { op, lhs, rhs } = e {
                 if is_cmp(*op) {
                     if self.known_int(lhs, ctx) && self.known_int(rhs, ctx) {
@@ -1209,14 +1209,14 @@ impl LlvmGen {
         // backend; wrap48 keeps overflow identical. Skipped in try-functions:
         // the custom setjmp/longjmp can clobber raw SSA temps that live across
         // it, so there we stay fully boxed (runtime calls are opaque, safe).
-        if !ctx.has_try && self.known_int(lhs, ctx) && self.known_int(rhs, ctx) {
+        if !ctx.has_try && !unbox_off() && self.known_int(lhs, ctx) && self.known_int(rhs, ctx) {
             if let Some(res) = self.int_binop(op, lhs, rhs, ctx, out)? {
                 return Ok(res);
             }
         }
         // unboxed float fast path: both sides proven float -> inline f64 math
         // (no fast-math flags, so IEEE-identical to the runtime). Box = bitcast.
-        if !ctx.has_try && self.known_float(lhs, ctx) && self.known_float(rhs, ctx) {
+        if !ctx.has_try && !unbox_off() && self.known_float(lhs, ctx) && self.known_float(rhs, ctx) {
             if let Some(res) = self.float_binop(op, lhs, rhs, ctx, out)? {
                 return Ok(res);
             }
@@ -2189,6 +2189,12 @@ fn sanitize(name: &str) -> String {
 // div/mod fast path only when the divisor can't trap (matches the runtime).
 fn nonzero_lit(e: &Expr) -> bool {
     matches!(e, Expr::Int(n) if *n != 0)
+}
+
+// Debug escape hatch: LUMEN_NO_UNBOX=1 disables the unboxed int/float fast
+// paths (forces the boxed runtime calls). Used to bisect optimization bugs.
+fn unbox_off() -> bool {
+    std::env::var("LUMEN_NO_UNBOX").is_ok()
 }
 
 fn is_cmp(op: BinOp) -> bool {

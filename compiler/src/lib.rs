@@ -92,6 +92,7 @@ pub fn compile(src: &str, base_dir: &Path, optimize: bool) -> Result<ast::Progra
         imported.append(&mut program);
         program = imported;
     }
+    dedupe_fns(&mut program);
 
     defaults::expand_program(&mut program)?;
     desugar::desugar_program(&mut program);
@@ -100,4 +101,30 @@ pub fn compile(src: &str, base_dir: &Path, optimize: bool) -> Result<ast::Progra
         opt::optimize_program(&mut program);
     }
     Ok(program)
+}
+
+// Drop duplicate top-level functions, keeping the LAST definition of each name.
+// The interpreter registers decls into a map (last wins), so two modules that
+// both define `near` resolve to the later one; the compiled backends emit every
+// definition and would hit duplicate-symbol errors. Deduping here makes all
+// three backends agree. Only free functions collide this way - structs, methods,
+// and externs are namespaced separately.
+fn dedupe_fns(program: &mut ast::Program) {
+    use std::collections::HashMap;
+    // index of the last Item::Fn for each name
+    let mut last: HashMap<String, usize> = HashMap::new();
+    for (i, item) in program.iter().enumerate() {
+        if let ast::Item::Fn(f) = item {
+            last.insert(f.name.clone(), i);
+        }
+    }
+    let mut i = 0;
+    program.retain(|item| {
+        let keep = match item {
+            ast::Item::Fn(f) => last.get(&f.name) == Some(&i),
+            _ => true,
+        };
+        i += 1;
+        keep
+    });
 }

@@ -122,10 +122,18 @@ typedef struct {
     LumenVal *caps;
 } LumenFunc;
 
+// A hardware NaN has all QNAN bits set, which collides with the "boxed value"
+// tag space (boxed == (v & QNAN) == QNAN). Legit boxed values always carry a
+// nonzero tag (int/bool/nil) or the SIGN bit (pointers), so the one QNAN pattern
+// with tag==0 and SIGN==0 is free - we reserve it as the canonical NaN and treat
+// it as a real double. lumen_from_double folds every NaN onto it so NaN results
+// (log/sqrt of a negative, 0.0/0.0, ...) round-trip as doubles, matching interp.
+#define LUMEN_CANON_NAN 0x7FF8000000000000ULL
 static inline int lumen_is_double(LumenVal v) { return (v & QNAN) != QNAN; }
 static inline int lumen_is_boxed(LumenVal v)  { return (v & QNAN) == QNAN; }
 
 LumenVal lumen_from_double(double d) {
+    if (d != d) return LUMEN_CANON_NAN; // canonicalize every NaN
     LumenVal v;
     memcpy(&v, &d, 8);
     return v;
@@ -463,6 +471,13 @@ void lumen_gc_collect(void) {
     // Amortize: only collect once enough has been allocated since the last run.
     if (lumen_allocs_since_gc < 512) return;
     lumen_allocs_since_gc = 0;
+
+    // Roots are found by conservatively scanning the live C stack. At -O1+ a
+    // live LumenVal can sit in a callee-saved register instead of a stack slot,
+    // where a plain stack scan can't see it -> use-after-free. __builtin_unwind_init
+    // spills all callee-saved registers into the current frame; taking stack_top
+    // AFTER it means those spills fall inside the scanned [lo, hi) range.
+    __builtin_unwind_init();
     volatile void *probe = NULL;
     void *stack_top = (void *)&probe;
     void *lo = stack_top, *hi = gc_stack_bottom;
@@ -514,6 +529,7 @@ void lumen_gc_init(void *stack_bottom) {
     gc_enabled = 1;
     const char *e = getenv("LUMEN_GC");
     if (e && e[0] == '1') atexit(lumen_gc_report);
+    if (e && e[0] == '0') gc_enabled = 0; // LUMEN_GC=0 disables collection (diag)
 }
 
 void lumen_release(LumenVal v);
@@ -657,6 +673,7 @@ LumenVal lumen_struct_get(LumenVal sv, const char *fname) {
 }
 
 static double as_num(LumenVal v) {
+    if (v == LUMEN_CANON_NAN) return lumen_to_double(v); // canonical NaN reads as a double
     if (lumen_is_double(v)) return lumen_to_double(v);
     if (lumen_is_int(v))    return (double)lumen_to_int(v);
     lumen_die("arithmetic on non-number");
@@ -793,6 +810,9 @@ static size_t val_hash(LumenVal v) {
 }
 
 static void fmt_double(double d, char *out, size_t cap) {
+    // match the interpreter's spelling for non-finite values
+    if (d != d) { snprintf(out, cap, "NaN"); return; }
+    if (isinf(d)) { snprintf(out, cap, d < 0 ? "-inf" : "inf"); return; }
 
     if (isfinite(d) && floor(d) == d) {
         snprintf(out, cap, "%.1f", d);
@@ -830,7 +850,7 @@ static void print_val(LumenVal v, int top);
 static void print_inner(LumenVal v) { print_val(v, 0); }
 
 static void print_val(LumenVal v, int top) {
-    if (lumen_is_double(v)) {
+    if (lumen_is_double(v) || v == LUMEN_CANON_NAN) {
         char nb[64];
         fmt_double(lumen_to_double(v), nb, sizeof nb);
         printf("%s", nb);
@@ -962,7 +982,7 @@ static LumenVal sfmt_to_str(LumenVal v) {
 
 LumenVal lumen_to_str(LumenVal v) {
     char buf[512];
-    if (lumen_is_double(v)) {
+    if (lumen_is_double(v) || v == LUMEN_CANON_NAN) {
         fmt_double(lumen_to_double(v), buf, sizeof buf);
     } else if (lumen_is_int(v)) {
         snprintf(buf, sizeof buf, "%lld", (long long)lumen_to_int(v));
