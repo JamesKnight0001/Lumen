@@ -15,6 +15,10 @@ fn bins() -> Vec<PathBuf> {
     let mut v = Vec::new();
     let mut push = |p: &str| v.push(PathBuf::from(p));
 
+    // The Lumen-tuned LLVM fork (built from github.com/JamesKnight0001/lumen-llvm:
+    // adds the gc "lumen" strategy + the lumen triple vendor). Preferred when
+    // present, so Lumen-aware features are available.
+    push("C:/llvm-build/bin");
     // MSYS2 mingw clang (x86_64-pc-windows-gnu, matches Lumen's gcc target).
     push("C:/msys64/mingw64/bin");
     push("C:/msys64/ucrt64/bin");
@@ -25,10 +29,10 @@ fn bins() -> Vec<PathBuf> {
 
     if let Ok(home) = std::env::var("USERPROFILE") {
         for rel in [
+            // Lumen ships its own LLVM fork bundle here (installer drops it).
+            "AppData/Local/Lumen/llvm/bin",
             "scoop/apps/llvm/current/bin",
             "scoop/shims",
-            // Lumen ships its own LLVM bundle here (installer drops it).
-            "AppData/Local/Lumen/llvm/bin",
         ] {
             v.push(PathBuf::from(format!("{home}/{rel}")));
         }
