@@ -27,6 +27,7 @@ pub struct LlvmGen {
     structs: HashMap<String, StructDef>,
     methods: HashMap<(String, String), FnDef>,
     externs: HashMap<String, ExternFn>,
+    info: crate::types::IntInfo, // proven int/float verdicts for unboxing
 }
 
 // A local variable lives in an alloca; we load/store its i64 by name.
@@ -35,6 +36,7 @@ struct Ctx {
     func: String,
     loops: Vec<(String, String)>, // (continue label, break label)
     self_slot: Option<String>,
+    has_try: bool, // fn contains a try -> disable unboxing (setjmp hazard)
 }
 
 impl Default for LlvmGen {
@@ -57,6 +59,7 @@ impl LlvmGen {
             structs: HashMap::new(),
             methods: HashMap::new(),
             externs: HashMap::new(),
+            info: crate::types::IntInfo::default(),
         }
     }
 
@@ -102,6 +105,7 @@ impl LlvmGen {
     }
 
     pub fn generate(&mut self, prog: &Program) -> Result<String, String> {
+        self.info = crate::types::analyze(prog);
         // collect decls (source order kept for determinism)
         for item in prog {
             match item {
@@ -244,6 +248,7 @@ impl LlvmGen {
             func: f.name.clone(),
             loops: Vec::new(),
             self_slot: None,
+            has_try: body_has_try(&f.body),
         };
 
         // signature: i64 (i64 %a0, ...). `self` is already a regular param named
@@ -326,8 +331,22 @@ impl LlvmGen {
     ) -> Result<(), String> {
         match s {
             Stmt::SrcLine(n) => {
-                self.need("lumen_set_line", "void @lumen_set_line(i32)");
-                let _ = writeln!(out, "  call void @lumen_set_line(i32 {n})");
+                // store directly to the runtime's line global instead of calling
+                // lumen_set_line - a call is an optimization barrier on every
+                // statement. Matches the asm backend (mov [rip+lumen_current_line]).
+                // In try-functions we keep the CALL: a bare store can be sunk or
+                // reordered across the custom setjmp/longjmp, scrambling which
+                // line a fault reports. The call is opaque, so it stays put.
+                if ctx.has_try {
+                    self.need("lumen_set_line", "void @lumen_set_line(i32)");
+                    let _ = writeln!(out, "  call void @lumen_set_line(i32 {n})");
+                } else {
+                    if self.declared.insert("@lumen_current_line".into()) {
+                        self.decls
+                            .push_str("@lumen_current_line = external global i32\n");
+                    }
+                    let _ = writeln!(out, "  store i32 {n}, ptr @lumen_current_line");
+                }
             }
             Stmt::Let { name, value, .. } => {
                 let v = self.gen_expr(value, ctx, out)?;
@@ -1111,6 +1130,24 @@ impl LlvmGen {
             return Ok(r);
         }
 
+        // unboxed int fast path: both sides proven int -> inline i64 math, no
+        // runtime call. Box the result (compares -> bool). Mirrors the asm
+        // backend; wrap48 keeps overflow identical. Skipped in try-functions:
+        // the custom setjmp/longjmp can clobber raw SSA temps that live across
+        // it, so there we stay fully boxed (runtime calls are opaque, safe).
+        if !ctx.has_try && self.known_int(lhs, ctx) && self.known_int(rhs, ctx) {
+            if let Some(res) = self.int_binop(op, lhs, rhs, ctx, out)? {
+                return Ok(res);
+            }
+        }
+        // unboxed float fast path: both sides proven float -> inline f64 math
+        // (no fast-math flags, so IEEE-identical to the runtime). Box = bitcast.
+        if !ctx.has_try && self.known_float(lhs, ctx) && self.known_float(rhs, ctx) {
+            if let Some(res) = self.float_binop(op, lhs, rhs, ctx, out)? {
+                return Ok(res);
+            }
+        }
+
         let l = self.gen_expr(lhs, ctx, out)?;
         let r = self.gen_expr(rhs, ctx, out)?;
         let f = runtime_op(op);
@@ -1118,6 +1155,253 @@ impl LlvmGen {
         let res = self.vreg();
         let _ = writeln!(out, "  {res} = call i64 @{f}(i64 {l}, i64 {r})");
         Ok(res)
+    }
+
+    // Is e provably a plain i64 (so we can compute it unboxed)? Conservative:
+    // int literals, proven-int idents/params, int-returning calls, and int ops
+    // over int operands. Anything else -> false (stay boxed).
+    fn known_int(&self, e: &Expr, ctx: &Ctx) -> bool {
+        match e {
+            Expr::Int(_) => true,
+            Expr::Ident(n) => self.info.is_int_var(&ctx.func, n),
+            Expr::Unary { op: UnOp::Neg, expr } => self.known_int(expr, ctx),
+            Expr::Binary { op, lhs, rhs } => {
+                // Div/Mod only when the divisor is a nonzero int literal: then
+                // the runtime's zero-check is moot and C-truncating srem/sdiv
+                // matches lumen_div/lumen_mod exactly. Otherwise stay boxed.
+                let arith = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul);
+                let divmod = matches!(op, BinOp::Div | BinOp::Mod) && nonzero_lit(rhs);
+                (arith || divmod) && self.known_int(lhs, ctx) && self.known_int(rhs, ctx)
+            }
+            Expr::Call { callee, .. } => {
+                matches!(&**callee, Expr::Ident(n) if self.info.int_ret.contains(n))
+            }
+            _ => false,
+        }
+    }
+
+    // Evaluate a proven-int expr to a RAW i64 (unboxed). Leaves unbox via
+    // shift; arithmetic stays raw with wrap48 after add/sub/mul.
+    fn eval_int(&mut self, e: &Expr, ctx: &mut Ctx, out: &mut String) -> Result<String, String> {
+        match e {
+            Expr::Int(n) => Ok(format!("{n}")),
+            Expr::Unary { op: UnOp::Neg, expr } => {
+                let a = self.eval_int(expr, ctx, out)?;
+                let r = self.vreg();
+                let _ = writeln!(out, "  {r} = sub i64 0, {a}");
+                Ok(self.wrap48(&r, out))
+            }
+            Expr::Binary { op, lhs, rhs }
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+                    && self.known_int(lhs, ctx)
+                    && self.known_int(rhs, ctx) =>
+            {
+                let a = self.eval_int(lhs, ctx, out)?;
+                let b = self.eval_int(rhs, ctx, out)?;
+                let r = self.vreg();
+                let inst = match op {
+                    BinOp::Add => "add",
+                    BinOp::Sub => "sub",
+                    BinOp::Mul => "mul",
+                    _ => unreachable!(),
+                };
+                let _ = writeln!(out, "  {r} = {inst} i64 {a}, {b}");
+                Ok(self.wrap48(&r, out))
+            }
+            // div/mod by a nonzero int literal: C-truncating sdiv/srem matches
+            // the runtime exactly; result stays in range so no wrap48 needed.
+            Expr::Binary { op, lhs, rhs }
+                if matches!(op, BinOp::Div | BinOp::Mod)
+                    && nonzero_lit(rhs)
+                    && self.known_int(lhs, ctx) =>
+            {
+                let a = self.eval_int(lhs, ctx, out)?;
+                let b = self.eval_int(rhs, ctx, out)?;
+                let r = self.vreg();
+                let inst = if *op == BinOp::Div { "sdiv" } else { "srem" };
+                let _ = writeln!(out, "  {r} = {inst} i64 {a}, {b}");
+                Ok(r)
+            }
+            // any other proven-int expr (ident, call): eval boxed then unbox
+            _ => {
+                let v = self.gen_expr(e, ctx, out)?;
+                Ok(self.unbox_int(&v, out))
+            }
+        }
+    }
+
+    // sign-extend the low 48 bits of a raw i64 (shl 16; ashr 16). Keeps Lumen's
+    // 48-bit wrapping identical to the interpreter and asm backend.
+    fn wrap48(&mut self, v: &str, out: &mut String) -> String {
+        let s = self.vreg();
+        let _ = writeln!(out, "  {s} = shl i64 {v}, 16");
+        let r = self.vreg();
+        let _ = writeln!(out, "  {r} = ashr i64 {s}, 16");
+        r
+    }
+
+    // unbox a NaN-boxed int word to a raw i64 (shl 16; ashr 16).
+    fn unbox_int(&mut self, v: &str, out: &mut String) -> String {
+        self.wrap48(v, out)
+    }
+
+    // re-box a raw i64 into a NaN-boxed int: (raw & 0xFFFFFFFFFFFF) | tag.
+    fn box_int(&mut self, raw: &str, out: &mut String) -> String {
+        let m = self.vreg();
+        let _ = writeln!(out, "  {m} = and i64 {raw}, 281474976710655"); // (1<<48)-1
+        let r = self.vreg();
+        let _ = writeln!(out, "  {r} = or i64 {m}, 9221401712017801216"); // 0x7FF9000000000000
+        r
+    }
+
+    // both operands proven int: compute unboxed, box the result. Returns None
+    // for ops we don't fast-path (Pow, In, NotIn) so the caller falls back.
+    fn int_binop(
+        &mut self,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        ctx: &mut Ctx,
+        out: &mut String,
+    ) -> Result<Option<String>, String> {
+        // arithmetic -> raw result, box it. Div/Mod included only when known_int
+        // already proved the divisor is a nonzero literal (eval_int emits sdiv/srem).
+        let divmod_ok = matches!(op, BinOp::Div | BinOp::Mod) && nonzero_lit(rhs);
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) || divmod_ok {
+            let raw = self.eval_int(&Expr::Binary {
+                op,
+                lhs: Box::new(lhs.clone()),
+                rhs: Box::new(rhs.clone()),
+            }, ctx, out)?;
+            return Ok(Some(self.box_int(&raw, out)));
+        }
+        // compares -> icmp on raw, box as bool
+        let cc = match op {
+            BinOp::Eq => "eq",
+            BinOp::Ne => "ne",
+            BinOp::Lt => "slt",
+            BinOp::Le => "sle",
+            BinOp::Gt => "sgt",
+            BinOp::Ge => "sge",
+            _ => return Ok(None), // Pow / In / NotIn: not fast-pathed
+        };
+        let a = self.eval_int(lhs, ctx, out)?;
+        let b = self.eval_int(rhs, ctx, out)?;
+        let c = self.vreg();
+        let _ = writeln!(out, "  {c} = icmp {cc} i64 {a}, {b}");
+        let z = self.vreg();
+        let _ = writeln!(out, "  {z} = zext i1 {c} to i32");
+        self.need("lumen_bool", "i64 @lumen_bool(i32)");
+        let r = self.vreg();
+        let _ = writeln!(out, "  {r} = call i64 @lumen_bool(i32 {z})");
+        Ok(Some(r))
+    }
+
+    // Is e provably an f64? Float literals, proven-float idents/params,
+    // float-returning calls, float ops over float operands.
+    fn known_float(&self, e: &Expr, ctx: &Ctx) -> bool {
+        match e {
+            Expr::Float(_) => true,
+            Expr::Ident(n) => self.info.is_float_var(&ctx.func, n),
+            Expr::Unary { op: UnOp::Neg, expr } => self.known_float(expr, ctx),
+            Expr::Binary { op, lhs, rhs } => {
+                matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div
+                ) && self.known_float(lhs, ctx)
+                    && self.known_float(rhs, ctx)
+            }
+            Expr::Call { callee, .. } => {
+                matches!(&**callee, Expr::Ident(n) if self.info.float_ret.contains(n))
+            }
+            _ => false,
+        }
+    }
+
+    // Evaluate a proven-float expr to a RAW double. A Lumen float value IS its
+    // own f64 bits (lumen_from_double is a bitcast), so unbox = bitcast i64->f64.
+    fn eval_float(&mut self, e: &Expr, ctx: &mut Ctx, out: &mut String) -> Result<String, String> {
+        match e {
+            Expr::Float(f) => Ok(fmt_double(*f)),
+            Expr::Unary { op: UnOp::Neg, expr } => {
+                let a = self.eval_float(expr, ctx, out)?;
+                let r = self.vreg();
+                let _ = writeln!(out, "  {r} = fneg double {a}");
+                Ok(r)
+            }
+            Expr::Binary { op, lhs, rhs }
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div)
+                    && self.known_float(lhs, ctx)
+                    && self.known_float(rhs, ctx) =>
+            {
+                let a = self.eval_float(lhs, ctx, out)?;
+                let b = self.eval_float(rhs, ctx, out)?;
+                let inst = match op {
+                    BinOp::Add => "fadd",
+                    BinOp::Sub => "fsub",
+                    BinOp::Mul => "fmul",
+                    BinOp::Div => "fdiv",
+                    _ => unreachable!(),
+                };
+                let r = self.vreg();
+                let _ = writeln!(out, "  {r} = {inst} double {a}, {b}");
+                Ok(r)
+            }
+            // ident / call: eval boxed then bitcast i64 -> double
+            _ => {
+                let v = self.gen_expr(e, ctx, out)?;
+                let r = self.vreg();
+                let _ = writeln!(out, "  {r} = bitcast i64 {v} to double");
+                Ok(r)
+            }
+        }
+    }
+
+    // box a raw double into a LumenVal: bitcast double -> i64 (a real double's
+    // bits ARE the boxed value; QNAN bits are clear).
+    fn box_float(&mut self, raw: &str, out: &mut String) -> String {
+        let r = self.vreg();
+        let _ = writeln!(out, "  {r} = bitcast double {raw} to i64");
+        r
+    }
+
+    // both operands proven float: compute unboxed, box the result. Compares
+    // return a boxed bool. Returns None for Pow/Mod/In (not fast-pathed).
+    fn float_binop(
+        &mut self,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        ctx: &mut Ctx,
+        out: &mut String,
+    ) -> Result<Option<String>, String> {
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+            let raw = self.eval_float(&Expr::Binary {
+                op,
+                lhs: Box::new(lhs.clone()),
+                rhs: Box::new(rhs.clone()),
+            }, ctx, out)?;
+            return Ok(Some(self.box_float(&raw, out)));
+        }
+        let cc = match op {
+            BinOp::Eq => "oeq",
+            BinOp::Ne => "one",
+            BinOp::Lt => "olt",
+            BinOp::Le => "ole",
+            BinOp::Gt => "ogt",
+            BinOp::Ge => "oge",
+            _ => return Ok(None), // Pow / Mod / In: not fast-pathed
+        };
+        let a = self.eval_float(lhs, ctx, out)?;
+        let b = self.eval_float(rhs, ctx, out)?;
+        let c = self.vreg();
+        let _ = writeln!(out, "  {c} = fcmp {cc} double {a}, {b}");
+        let z = self.vreg();
+        let _ = writeln!(out, "  {z} = zext i1 {c} to i32");
+        self.need("lumen_bool", "i64 @lumen_bool(i32)");
+        let r = self.vreg();
+        let _ = writeln!(out, "  {r} = call i64 @lumen_bool(i32 {z})");
+        Ok(Some(r))
     }
 
     fn gen_fstring(
@@ -1827,10 +2111,15 @@ fn sanitize(name: &str) -> String {
     s
 }
 
+// True if e is an int literal that isn't zero. Used to allow the unboxed
+// div/mod fast path only when the divisor can't trap (matches the runtime).
+fn nonzero_lit(e: &Expr) -> bool {
+    matches!(e, Expr::Int(n) if *n != 0)
+}
+
 // Print a double in LLVM hex form when it isn't exactly representable as a
 // short decimal, so the bit pattern is preserved exactly (matches the asm
 // backend's .quad bits approach -> byte-identical float behavior).
 fn fmt_double(f: f64) -> String {
-    // LLVM accepts 0x<hex> for the exact IEEE-754 bits of a double.
     format!("0x{:016X}", f.to_bits())
 }

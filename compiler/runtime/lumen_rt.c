@@ -167,7 +167,13 @@ int lumen_is_bool(LumenVal v)  { return lumen_is_boxed(v) && !(v & SIGN) && tag_
 int lumen_is_nil(LumenVal v)   { return lumen_is_boxed(v) && !(v & SIGN) && tag_of(v) == TAG_NIL; }
 int lumen_is_ptr(LumenVal v)   { return lumen_is_boxed(v) && (v & SIGN); }
 
-uint32_t lumen_current_line = 0;
+// volatile so the line update can't be reordered/elided across the custom
+// setjmp/longjmp. noinline so LTO can't inline it into a caller (which would
+// turn the call into a reorderable store and scramble the reported fault line).
+volatile uint32_t lumen_current_line = 0;
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
 void lumen_set_line(uint32_t n) { lumen_current_line = n; }
 
 #include <stdint.h>

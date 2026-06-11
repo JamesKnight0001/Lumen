@@ -323,7 +323,11 @@ fn build_llvm(prog: &ast::Program, _file: &str, src: &str, args: &[String]) {
     // clang drives the whole chain: .ll -> .o, the C runtime -> .o, link via lld.
     let clang = lumenc::llvm::find_clang()
         .unwrap_or_else(|| fatal(&format!("error: {}", lumenc::llvm::install_hint())));
-    let opt = std::env::var("LUMEN_LLVM_OPT").unwrap_or_else(|_| "-O2".into());
+    // -O3, no LTO. LTO miscompiles the try/catch path (it reorders work across
+    // the runtime's custom setjmp/longjmp), so we keep it off for correctness.
+    // -O3 + the unboxed-int fast path is byte-identical at every opt level and
+    // captures the bulk of the speedup. Override with LUMEN_LLVM_OPT if desired.
+    let opt = std::env::var("LUMEN_LLVM_OPT").unwrap_or_else(|_| "-O3".into());
     let mut cmd = Command::new(&clang.program);
     prepend_path(&mut cmd, clang.bin_dir.as_deref());
     for f in opt.split_whitespace() {
