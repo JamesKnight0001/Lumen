@@ -164,15 +164,40 @@ fn main() {
     }
 }
 
+// Explicit backend pick, if any: --backend <x>, --backend=<x>, or LUMEN_BACKEND.
+// Returns lowercased "llvm"/"asm"/"gcc"; None means "use the default".
+fn backend_choice(args: &[String]) -> Option<String> {
+    for (i, a) in args.iter().enumerate() {
+        if let Some(v) = a.strip_prefix("--backend=") {
+            return Some(v.to_lowercase());
+        }
+        if a == "--backend" {
+            if let Some(v) = args.get(i + 1) {
+                return Some(v.to_lowercase());
+            }
+        }
+    }
+    std::env::var("LUMEN_BACKEND").ok().map(|v| v.to_lowercase())
+}
+
 fn build(prog: &ast::Program, file: &str, src: &str, args: &[String]) {
-    // Backend selector: LUMEN_BACKEND=llvm (or --backend llvm) emits LLVM IR and
-    // links with clang+lld; default stays the asm+gcc path during bring-up.
-    let want_llvm = std::env::var("LUMEN_BACKEND").as_deref() == Ok("llvm")
-        || args.iter().any(|a| a == "--backend=llvm")
-        || args
-            .windows(2)
-            .any(|w| w[0] == "--backend" && w[1] == "llvm");
-    if want_llvm {
+    // Backend selector. LLVM is the DEFAULT (emits IR, links via clang+lld); if
+    // the LLVM toolchain isn't installed we fall back to the asm+gcc backend.
+    // Override either way: LUMEN_BACKEND=llvm|asm (or gcc), or --backend <x>.
+    let pick = backend_choice(args);
+    let use_llvm = match pick.as_deref() {
+        Some("llvm") => true,
+        Some("asm") | Some("gcc") => false,
+        // default: LLVM when clang+lld are present, else fall back to gcc
+        _ => {
+            let ok = lumenc::llvm::find_clang().is_some() && lumenc::llvm::find_lld().is_some();
+            if !ok {
+                eprintln!("note: LLVM toolchain not found, using the gcc backend");
+            }
+            ok
+        }
+    };
+    if use_llvm {
         return build_llvm(prog, file, src, args);
     }
 
@@ -200,6 +225,12 @@ fn build(prog: &ast::Program, file: &str, src: &str, args: &[String]) {
             }
             "--native" => {
                 native = true;
+                i += 1;
+            }
+            "--backend" => {
+                i += 2; // consume "--backend <x>" (already handled by backend_choice)
+            }
+            a if a.starts_with("--backend=") => {
                 i += 1;
             }
             other => {
@@ -608,7 +639,7 @@ fn print_usage() {
     eprintln!("USAGE:");
     eprintln!("  lumen run    <file.lm>               run via the Tier-0 interpreter");
     eprintln!(
-        "  lumen build  <file.lm> [-o out.exe] [--icon <p>] [--native]  compile to a native .exe"
+        "  lumen build  <file.lm> [-o out.exe] [--icon <p>] [--native] [--backend llvm|asm]  compile to a native .exe (LLVM by default, gcc fallback)"
     );
     eprintln!("  lumen -c     \"<source>\"               run inline source");
     eprintln!("  lumen new    <name>                  scaffold a new project directory");
