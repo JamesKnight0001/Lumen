@@ -307,8 +307,16 @@ fn build(prog: &ast::Program, file: &str, src: &str, args: &[String]) {
 // Prepend `dir` to the child command's PATH so a located tool finds its
 // siblings (gcc -> as/ld) even when the parent shell's PATH lacks them.
 fn prepend_path(cmd: &mut Command, dir: Option<&Path>) {
-    let Some(dir) = dir else { return };
-    let mut paths = vec![dir.to_path_buf()];
+    // Child PATH = clang's own bin + every known toolchain root + the inherited
+    // PATH. The forked clang (C:/llvm-build/bin) is dynamically linked against
+    // MSYS runtime DLLs (libstdc++-6, libgcc_s_seh-1, libwinpthread-1) that live
+    // in C:/msys64/mingw64/bin, so those dirs MUST be reachable or the child dies
+    // with 0xC0000135 (DLL not found) when run from a clean shell.
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(d) = dir {
+        paths.push(d.to_path_buf());
+    }
+    paths.extend(lumenc::llvm::bins());
     if let Some(old) = std::env::var_os("PATH") {
         paths.extend(std::env::split_paths(&old));
     }

@@ -11,7 +11,7 @@ const EXE: &str = ".exe";
 const EXE: &str = "";
 
 // Standard LLVM/MSYS2 install roots to scan, in priority order.
-fn bins() -> Vec<PathBuf> {
+pub fn bins() -> Vec<PathBuf> {
     let mut v = Vec::new();
     let mut push = |p: &str| v.push(PathBuf::from(p));
 
