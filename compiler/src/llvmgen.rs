@@ -579,7 +579,10 @@ impl LlvmGen {
         let boxed = self.vreg();
         let _ = writeln!(out, "  {boxed} = call i64 @lumen_from_int(i64 {curi})");
         let _ = writeln!(out, "  store i64 {boxed}, ptr {vslot}");
-        self.gc_poll(out);
+        // skip the GC poll when the body provably can't allocate (tight numeric loop)
+        if self.stmts_alloc(body, ctx) {
+            self.gc_poll(out);
+        }
         ctx.loops.push((cont.clone(), end.clone()));
         let mut t = false;
         for st in body {
@@ -656,7 +659,9 @@ impl LlvmGen {
         let el = self.vreg();
         let _ = writeln!(out, "  {el} = call i64 @lumen_list_get(i64 {l2}, i64 {i})");
         let _ = writeln!(out, "  store i64 {el}, ptr {vslot}");
-        self.gc_poll(out);
+        if self.stmts_alloc(body, ctx) {
+            self.gc_poll(out);
+        }
         ctx.loops.push((cont.clone(), end.clone()));
         let mut t = false;
         for st in body {
@@ -800,6 +805,52 @@ impl LlvmGen {
     // them (the allocas live in this frame). Precise shadow-stack is the next
     // step (plan doc 03); this is correct because nothing is kept only in a
     // register across the call - allocas are memory.
+    // Conservative: can running these stmts allocate heap (bump allocs_since_gc)?
+    // Only heap objects (str/list/map/struct/closure) and calls allocate; unboxed
+    // int/float arithmetic does not. Used to skip the GC poll in tight numeric
+    // loops. Defaults to TRUE for anything uncertain (safe: an extra poll is fine).
+    fn stmts_alloc(&self, body: &[Stmt], ctx: &Ctx) -> bool {
+        body.iter().any(|s| self.stmt_allocs(s, ctx))
+    }
+    fn stmt_allocs(&self, s: &Stmt, ctx: &Ctx) -> bool {
+        match s {
+            Stmt::SrcLine(_) | Stmt::Break | Stmt::Continue => false,
+            Stmt::Let { value, .. } => self.expr_allocs(value, ctx),
+            Stmt::Assign { value, .. } => self.expr_allocs(value, ctx),
+            Stmt::ExprStmt(e) => self.expr_allocs(e, ctx),
+            Stmt::Return(Some(e)) => self.expr_allocs(e, ctx),
+            Stmt::Return(None) => false,
+            Stmt::If { cond, then, elifs, els } => {
+                self.expr_allocs(cond, ctx)
+                    || self.stmts_alloc(then, ctx)
+                    || elifs
+                        .iter()
+                        .any(|(c, b)| self.expr_allocs(c, ctx) || self.stmts_alloc(b, ctx))
+                    || els.as_ref().is_some_and(|b| self.stmts_alloc(b, ctx))
+            }
+            // nested loops/try: assume they may allocate (keep their own polls)
+            _ => true,
+        }
+    }
+    fn expr_allocs(&self, e: &Expr, ctx: &Ctx) -> bool {
+        match e {
+            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Nil
+            | Expr::Ident(_) | Expr::SelfExpr => false,
+            Expr::Unary { expr, .. } => self.expr_allocs(expr, ctx),
+            Expr::Binary { lhs, rhs, .. } => {
+                // proven-numeric binops compute unboxed (no alloc); otherwise the
+                // boxed path could be a string concat etc. -> assume it allocates.
+                let numeric = (self.known_int(lhs, ctx) && self.known_int(rhs, ctx))
+                    || (self.known_float(lhs, ctx) && self.known_float(rhs, ctx));
+                !numeric || self.expr_allocs(lhs, ctx) || self.expr_allocs(rhs, ctx)
+            }
+            Expr::Index { obj, index } => self.expr_allocs(obj, ctx) || self.expr_allocs(index, ctx),
+            Expr::Field { obj, .. } => self.expr_allocs(obj, ctx),
+            // literals that build heap objects, calls, comprehensions, closures
+            _ => true,
+        }
+    }
+
     fn gc_poll(&mut self, out: &mut String) {
         self.need("lumen_gc_collect", "void @lumen_gc_collect()");
         if self.declared.insert("@lumen_allocs_since_gc".into()) {
@@ -1083,6 +1134,29 @@ impl LlvmGen {
     }
 
     fn gen_truthy(&mut self, e: &Expr, ctx: &mut Ctx, out: &mut String) -> Result<String, String> {
+        // fast path: a proven int/float comparison feeding a branch -> emit the
+        // icmp/fcmp i1 directly, skipping the lumen_bool box + lumen_truthy unbox
+        // round-trip. Big win for if/while conditions (e.g. fib's `n < 2`).
+        if !ctx.has_try {
+            if let Expr::Binary { op, lhs, rhs } = e {
+                if is_cmp(*op) {
+                    if self.known_int(lhs, ctx) && self.known_int(rhs, ctx) {
+                        let a = self.eval_int(lhs, ctx, out)?;
+                        let b = self.eval_int(rhs, ctx, out)?;
+                        let r = self.vreg();
+                        let _ = writeln!(out, "  {r} = icmp {} i64 {a}, {b}", icmp_cc(*op));
+                        return Ok(r);
+                    }
+                    if self.known_float(lhs, ctx) && self.known_float(rhs, ctx) {
+                        let a = self.eval_float(lhs, ctx, out)?;
+                        let b = self.eval_float(rhs, ctx, out)?;
+                        let r = self.vreg();
+                        let _ = writeln!(out, "  {r} = fcmp {} double {a}, {b}", fcmp_cc(*op));
+                        return Ok(r);
+                    }
+                }
+            }
+        }
         let v = self.gen_expr(e, ctx, out)?;
         self.need("lumen_truthy", "i32 @lumen_truthy(i64)");
         let t = self.vreg();
@@ -2115,6 +2189,39 @@ fn sanitize(name: &str) -> String {
 // div/mod fast path only when the divisor can't trap (matches the runtime).
 fn nonzero_lit(e: &Expr) -> bool {
     matches!(e, Expr::Int(n) if *n != 0)
+}
+
+fn is_cmp(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+    )
+}
+
+// LLVM signed-int compare condition code for a Lumen compare op.
+fn icmp_cc(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Eq => "eq",
+        BinOp::Ne => "ne",
+        BinOp::Lt => "slt",
+        BinOp::Le => "sle",
+        BinOp::Gt => "sgt",
+        BinOp::Ge => "sge",
+        _ => unreachable!(),
+    }
+}
+
+// LLVM ordered-float compare condition code for a Lumen compare op.
+fn fcmp_cc(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Eq => "oeq",
+        BinOp::Ne => "one",
+        BinOp::Lt => "olt",
+        BinOp::Le => "ole",
+        BinOp::Gt => "ogt",
+        BinOp::Ge => "oge",
+        _ => unreachable!(),
+    }
 }
 
 // Print a double in LLVM hex form when it isn't exactly representable as a
