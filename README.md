@@ -7,7 +7,10 @@ Lumen can either:
 * **Interpret** source (`lumen run`)
 * **Compile** directly to native **x86-64 executables** (`lumen build`)
 
-No LLVM. No external IR. Just a parser, optimizer, interpreter, and native code generator.
+Two compiled backends share one runtime and produce byte-identical output: an
+LLVM backend (the default - emits LLVM IR, links with clang + lld) and a
+hand-written x86-64 assembly backend (the fallback when no LLVM toolchain is
+present, opt-in via `--backend asm`).
 
 ```lumen
 fn make_counter():
@@ -37,10 +40,12 @@ All it takes is 2 clicks, to install lumen.
 Requirements:
 
 * Rust (via rustup)
-* GCC/Clang (used for assembling and linking compiled programs). On Windows,
-  install MinGW-w64 (e.g. via MSYS2) anywhere standard and Lumen finds it
-  automatically - no PATH setup needed. Run `lumen doctor` to confirm, or set
-  `LUMEN_CC` to point at a specific `gcc.exe`.
+* An LLVM toolchain (`clang` + `lld`) for the default build backend, **or** GCC
+  for the fallback asm backend. On Windows, install MinGW-w64 / LLVM (e.g. via
+  MSYS2: `pacman -S mingw-w64-x86_64-clang mingw-w64-x86_64-lld`) anywhere
+  standard and Lumen finds it automatically - no PATH setup needed. Run
+  `lumen doctor` to confirm, or set `LUMEN_CLANG` / `LUMEN_CC` to point at a
+  specific binary.
 
 Build:
 
@@ -65,7 +70,7 @@ lumen -c 'fn main(): print(2 ** 10)'
 | Command               | Description                    |
 | --------------------- | ------------------------------ |
 | `lumen run <file>`    | Interpret a program            |
-| `lumen build <file>`  | Compile to a native executable |
+| `lumen build <file>`  | Compile to a native executable (LLVM by default; `--backend asm` for gcc) |
 | `lumen repl`          | Interactive REPL               |
 | `lumen -c "<src>"`    | Run inline source              |
 | `lumen check <file>`  | Parse and compile-check        |
@@ -101,7 +106,8 @@ source
   → optimizer (runs to a fixpoint)
   → type analysis (proves int / float / int-list / float-list)
       ├─ interpreter
-      └─ x86-64 code generator
+      ├─ LLVM backend      (default: .ll → clang + lld → .exe)
+      └─ x86-64 backend    (fallback / --backend asm: GAS → gcc)
 ```
 
 Both execution modes consume the same lowered AST. A differential test suite
@@ -110,51 +116,68 @@ to the byte.
 
 ## Performance
 
-Compiled Lumen is built to meet C on the hot numeric path and to beat every
-managed language (Java, Node, CPython) across the board. Values are NaN-boxed,
-and the compiler proves which locals, parameters, and list elements are always
-integers or always floats so they stay **unboxed** in the generated machine
-code. Reduction accumulators and loop counters are promoted into registers.
+`lumen build` compiles to native code via LLVM (`-O3`). Values are NaN-boxed,
+and a whole-program type analysis proves which locals, parameters, and list
+elements are always integers or always floats, so they stay **unboxed** in the
+generated code - integer/float arithmetic and comparisons become inline machine
+instructions instead of runtime calls, and tight numeric loops drop their GC
+safepoints entirely.
 
-Measured on this machine (Windows, mingw64 gcc 15.2, rustc 1.96, Java 25,
-Node 24, Python 3.12); medians, warmup discarded; every program's output is
-byte-identical across languages:
+Four workloads, each computing an identical result in every language, best-of-5
+wall-clock. Measured on this machine (Windows; LLVM/clang 21.1.6, gcc 16.1,
+rustc 1.96, OpenJDK 25, Node 24, CPython 3.14). `fib`/`loop`/`map` outputs are
+byte-identical across all six languages, and Lumen's interpreter, LLVM build,
+and asm build agree to the byte. Run it yourself: `python bench/bench.py`.
 
-| Workload | Lumen 0.77 | C `-O2` | Rust `-O` | Node | Python |
-|----------|-----------|---------|-----------|------|--------|
-| `fib(34)` recursion | **~32 ms** | ~15 ms | ~21 ms | ~117 ms | ~1132 ms |
-| collatz (data-dependent scalar) | **~139 ms** | ~52 ms | ~35 ms | ~282 ms | ~3220 ms |
-| int-list sum, 100M reads | **~225 ms** | ~21 ms* | ~15 ms* | ~182 ms | ~8975 ms |
+| Workload | Lumen | C `-O2` | Rust `-O` | Java | Node | Python |
+|----------|------:|--------:|----------:|-----:|-----:|-------:|
+| `fib(35)` recursion        | **50 ms**  | 19 ms | 27 ms | 86 ms  | 155 ms | 1045 ms |
+| float reduce, 5×10⁷ iters  | **77 ms**  | 52 ms | 53 ms | 166 ms | 102 ms | 3900 ms |
+| int loop + modulo, 5×10⁷   | **82 ms**  | 50 ms | 53 ms | 116 ms | 148 ms | 4030 ms |
+| hash-map build+lookup, 10⁶ | **31 ms**  | 12 ms | 27 ms | 98 ms  |  84 ms |  144 ms |
 
-Read those honestly. On fair scalar code Lumen lands ~2-2.7× off C and clearly
-ahead of Node (2-4×) and Python (20-35×). The asterisks matter: on the int-list
-sum, gcc/rustc *auto-vectorize* (SIMD) and on simpler reductions they delete the
-loop entirely via constant-folding - that's the compiler removing the work, not
-the language being faster at it. Lumen emits honest scalar code and still beats
-every interpreter. The full story, methodology, and per-release deltas are in
+Ratios vs C (lower is better): Lumen is **1.5×** off C on the float reduction,
+**1.6×** on the integer loop, and **2.6×** on recursion and hash-map throughput.
+It beats Java, Node, and CPython on every workload - up to ~3× faster than Node
+and 12-80× faster than CPython - while staying a dynamically-typed language with
+the same source running unchanged under the interpreter.
+
+Read those honestly: C and Rust still win outright, and on some reductions they
+auto-vectorize or constant-fold work away that Lumen emits as straight scalar
+code. The goal isn't to beat C - it's to get within a small constant factor of
+it from a Python-like language, and to leave every managed runtime behind. The
+full methodology and per-release deltas live in
 [`docs/lumen/performance.md`](docs/lumen/performance.md).
 
 ## Status
 
 Current features include:
 
-* Native x86-64 code generation
+* Two native backends: LLVM (default) and hand-written x86-64 assembly
 * Generational mark/sweep garbage collection
 * Closures
 * Modules, relative imports, default arguments
 * C FFI (including Win32/COM usage)
 * Standard library
 
-Current limitations (Soon to fix, with LLVM):
+Recent backend work:
+
+* **LLVM backend** - `lumen build` defaults to emitting LLVM IR and linking with
+  clang + lld; falls back to the asm backend when no LLVM toolchain is present
+* **Unboxed numerics** - proven int/float locals compile to inline `i64`/`double`
+  arithmetic instead of boxed runtime calls (recursion ~2.9×, float/loop ~4× faster)
+* **Branch-on-compare** - int/float comparisons feeding `if`/`while` lower to a
+  direct `icmp`/`fcmp` + branch, skipping the box/unbox round-trip
+* **GC safepoint elision** - loops proven not to allocate drop their per-iteration
+  GC poll
+
+Current limitations:
 
 * x86-64 only
 * 48-bit wrapping integers
 * No incremental compilation
 * Imported modules share a global namespace
 * No auto-vectorizer (the main remaining gap to C on reducible loops)
-
-## MERGES
-* I WILL KEEP ON CONTNUING TO MERGE THE CODEBASE, AS BASES UNTIL REACHING V1.0.0 (RELEASE)
 
 ## Documentation
 
