@@ -1,19 +1,16 @@
 //! LLVM backend: lowers the merged AST to textual LLVM IR (.ll) that calls the
-//! same lumen_* runtime ABI the asm backend (codegen.rs) uses. Because the
-//! runtime is shared and every op routes through it, output is byte-identical
-//! to the interpreter and the asm backend.
+//! same lumen_* runtime ABI the asm backend (codegen.rs) uses. The shared
+//! runtime keeps output byte-identical to the interpreter and the asm backend.
 //!
-//! MVP strategy: fully boxed. Every Lumen value is an i64 (NaN-boxed LumenVal).
-//! Every operation calls a runtime helper (lumen_add, lumen_eq, lumen_print,
-//! ...). No unboxing fast paths yet - correctness first, speed later. LLVM -O2
-//! still optimizes the surrounding glue, and the runtime does the real work.
+//! Values are NaN-boxed i64 and most ops route through the runtime, but proven
+//! int/float locals are unboxed (raw i64/double, branch-on-compare), proven-int
+//! slots stay raw across a loop, and non-escaping collections are arena-placed.
 
 use crate::ast::*;
 use std::collections::HashMap;
 use std::fmt::Write;
 
 pub struct LlvmGen {
-    // module-level text built up as we go
     decls: String,   // declare lines (deduped via `declared`)
     globals: String, // private string/const globals
     body: String,    // all function definitions
