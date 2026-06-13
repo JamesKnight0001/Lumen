@@ -3898,7 +3898,7 @@ mod peephole_tests {
     use super::peephole;
 
     #[test]
-    fn drops_redundant_reload() {
+    fn drop_reload() {
         let asm = "    mov [rbp-8], rax\n    mov rax, [rbp-8]\n";
         let got = peephole(asm);
         assert!(got.contains("mov [rbp-8], rax"));
@@ -3907,7 +3907,7 @@ mod peephole_tests {
     }
 
     #[test]
-    fn reload_to_reg_move() {
+    fn reload_move() {
         let asm = "    mov [rbp-8], rax\n    mov rcx, [rbp-8]\n";
         let got = peephole(asm);
         assert!(got.contains("mov rcx, rax"));
@@ -3915,7 +3915,7 @@ mod peephole_tests {
     }
 
     #[test]
-    fn leaves_unrelated_alone() {
+    fn leave_others() {
 
         let asm = "    mov [rbp-8], rax\n    mov rcx, [rbp-16]\n";
         let got = peephole(asm);
@@ -3971,7 +3971,7 @@ mod magic_div_tests {
     }
 
     #[test]
-    fn magic_matches_idiv() {
+    fn magic_idiv() {
         let divisors: [i64; 30] = [
             1, -1, 2, -2, 3, -3, 4, -4, 5, 6, 7, -7, 8, -8, 9, 10, 11, 13, -13, 16, 17, 100, -100,
             128, 1000, -1000, 1024, 65536, 1_000_000, 7_777_777,
@@ -4041,7 +4041,7 @@ mod magic_div_tests {
     }
 
     #[test]
-    fn mask_mod_matches_rem() {
+    fn maskrem_eq() {
         let pow2: [i64; 12] = [2, 4, 8, 16, 32, 64, 128, 256, 1024, 65536, 1 << 20, 1 << 30];
         let mut ns: Vec<i64> = vec![
             0, 1, -1, 2, -2, 3, -3, 7, -7, 8, -8, 15, -15, 100, -100, i64::MAX, i64::MIN,

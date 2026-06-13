@@ -1542,7 +1542,7 @@ mod tests {
     use super::{lookup, Value};
 
     #[test]
-    fn math_fns_ok() {
+    fn math_ok() {
         let f = lookup("math", "log2").expect("math.log2 missing");
         assert!(
             matches!((f.eval)(&[Value::Float(8.0)]).unwrap(), Value::Float(x) if (x - 3.0).abs() < 1e-12)
@@ -1588,7 +1588,7 @@ mod tests {
     }
 
     #[test]
-    fn os_fns_ok() {
+    fn os_ok() {
         for name in [
             "setenv", "cwd", "time", "clock", "getpid", "sep", "platform", "system", "exec",
             "exit", "args",
@@ -1598,7 +1598,7 @@ mod tests {
     }
 
     #[test]
-    fn net_fns_ok() {
+    fn net_ok() {
         for (name, arity) in [
             ("listen", 2u8), ("accept", 1), ("connect", 2), ("udp", 2),
             ("send", 2), ("recv", 2), ("sendto", 4), ("recvfrom", 2),
@@ -1661,7 +1661,7 @@ mod tests {
     }
 
     #[test]
-    fn time_fmt_utc() {
+    fn time_utc() {
         let fmt = lookup("time", "format").expect("time.format missing");
         let f = |secs: i64| match (fmt.eval)(&[Value::Int(secs)]).unwrap() {
             Value::Str(s) => s.to_string(),

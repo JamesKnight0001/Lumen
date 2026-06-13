@@ -647,14 +647,14 @@ mod tests {
     }
 
     #[test]
-    fn block_comment_code() {
+    fn block_code() {
         // Code after `]#` on the same line survives.
         let t = toks("#[ c ]# let x = 1\n");
         assert!(matches!(t[0], Tok::Let));
     }
 
     #[test]
-    fn line_comment_ok() {
+    fn line_ok() {
         let t = toks("# just a line\nlet y = 2\n");
         assert!(matches!(t[0], Tok::Let));
     }

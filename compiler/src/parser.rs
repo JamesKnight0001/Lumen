@@ -1070,7 +1070,7 @@ mod tests {
 
     // Every decl span must slice back to exactly its own name in the source.
     #[test]
-    fn spans_map_to_names() {
+    fn spans_named() {
         let src = "from math import sqrt, pi\n\
                    struct Point:\n    x: int\n    y: int\n\
                    impl Point:\n    fn dist(self, other):\n        return sqrt(other)\n\
@@ -1098,7 +1098,7 @@ mod tests {
 
     // The normal (spanless) parse path must yield no decls.
     #[test]
-    fn spanless_path_collects_nothing() {
+    fn spanless_empty() {
         let toks = crate::lexer::Lexer::new("fn f():\n    return 1\n")
             .tokenize()
             .unwrap();
@@ -1111,7 +1111,7 @@ mod tests {
     // silently parsed as a second statement. Regression for `return x 999`,
     // `let x = 1 2`, bare-literal-then-more, `f() garbage`, etc.
     #[test]
-    fn rejects_trailing_junk_after_statement() {
+    fn reject_junk() {
         let bad = [
             "fn f():\n    return 1 999\n",
             "fn f():\n    let x = 1 2 3\n    return x\n",
@@ -1130,7 +1130,7 @@ mod tests {
     // `;` is a statement separator (lexes to Newline), so these stay valid.
     // Compound statements remain self-terminating. Guards against over-rejection.
     #[test]
-    fn accepts_valid_statement_ends() {
+    fn stmt_ends() {
         let good = [
             "fn main():\n    print(1); print(2)\n",
             "fn main():\n    print(1);\n",

@@ -1510,7 +1510,7 @@ mod tests {
     }
 
     #[test]
-    fn eligible_for_range_sum() {
+    fn rangesum_ok() {
         let f = parse_fn(
             "fn s(n: i64) -> i64:\n    let t = 0\n    for i in 0..n:\n        t = t + i\n    return t\n",
         );
@@ -1518,19 +1518,19 @@ mod tests {
     }
 
     #[test]
-    fn inelig_uses_list() {
+    fn inelig_list() {
         let f = parse_fn("fn f(n: i64) -> i64:\n    let xs = [1, 2, 3]\n    return n\n");
         assert!(!mir_eligible(&f, &IntInfo::default()));
     }
 
     #[test]
-    fn inelig_non_numeric() {
+    fn inelig_nonnum() {
         let f = parse_fn("fn f(s: str) -> i64:\n    return 1\n");
         assert!(!mir_eligible(&f, &IntInfo::default()));
     }
 
     #[test]
-    fn inelig_for_over_list() {
+    fn inelig_forlist() {
         let f = parse_fn(
             "fn f(n: i64) -> i64:\n    let t = 0\n    for x in [1, 2]:\n        t = t + x\n    return t\n",
         );
@@ -1538,7 +1538,7 @@ mod tests {
     }
 
     #[test]
-    fn val_float_roundtrip() {
+    fn float_round() {
 
         assert_eq!(Val::float(1.5), Val::FloatConst(1.5f64.to_bits()));
         assert_eq!(Val::float(-0.0), Val::FloatConst(0x8000_0000_0000_0000));
@@ -1556,7 +1556,7 @@ mod tests {
     }
 
     #[test]
-    fn inst_def_and_terminator() {
+    fn def_term() {
         let bin = Inst::Bin {
             dst: 3,
             op: BinKind::IAdd,
@@ -1581,7 +1581,7 @@ mod tests {
     }
 
     #[test]
-    fn build_add_by_hand() {
+    fn hand_add() {
         let mut f = MirFn::new("add", vec![false, false], false);
         let entry = f.new_block();
         assert_eq!(entry, 0);
@@ -1608,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn build_loop_cfg() {
+    fn loop_cfg() {
 
         let mut f = MirFn::new("loopy", vec![false], false);
         let entry = f.new_block();
@@ -1656,7 +1656,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_open_block() {
+    fn reject_open() {
         let mut f = MirFn::new("bad", vec![], false);
         let b = f.new_block();
         f.block_mut(b).insts.push(Inst::Move {
@@ -1667,7 +1667,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_phi_after_nonphi() {
+    fn reject_latephi() {
         let mut f = MirFn::new("bad2", vec![], false);
         let b = f.new_block();
         f.block_mut(b).insts.push(Inst::Move {
@@ -1683,7 +1683,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_oob_branch() {
+    fn reject_oob() {
         let mut f = MirFn::new("bad3", vec![], false);
         let b = f.new_block();
         f.block_mut(b).insts.push(Inst::Jmp(99));
@@ -1744,7 +1744,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_float_add() {
+    fn float_add() {
         let m = lower("fn fadd(a: f64, b: f64) -> f64:\n    return a + b\n");
         assert!(m.ret_is_float);
         let has_fadd = m.blocks.iter().flat_map(|b| &b.insts).any(|i| {
@@ -1792,7 +1792,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_for_range_phi() {
+    fn range_phi() {
 
         let m = lower(
             "fn s(n: i64) -> i64:\n    let t = 0\n    for i in 0..n:\n        t = t + i\n    return t\n",
@@ -1824,7 +1824,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_while_ok() {
+    fn while_ok() {
         let m = lower(
             "fn countdown(n: i64) -> i64:\n    let acc = 0\n    while n > 0:\n        acc = acc + n\n        n = n - 1\n    return acc\n",
         );
@@ -1833,7 +1833,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_const_div_magic() {
+    fn magic_div() {
 
         let m = lower("fn r(x: i64) -> i64:\n    return x % 7\n");
         let has_modconst = m.blocks.iter().flat_map(|b| &b.insts).any(|i| {
@@ -1849,7 +1849,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_runtime_div_idiv() {
+    fn rt_idiv() {
 
         let m = lower("fn d(x: i64, y: i64) -> i64:\n    return x / y\n");
         let has_idiv = m.blocks.iter().flat_map(|b| &b.insts).any(|i| {
@@ -1865,7 +1865,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_ssa_single_def() {
+    fn ssa_onedef() {
         let srcs = [
             "fn add(a: i64, b: i64) -> i64:\n    return a + b\n",
             "fn fib(n: i64) -> i64:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\n",
@@ -1948,7 +1948,7 @@ mod tests {
     }
 
     #[test]
-    fn regalloc_fib_callee_saved() {
+    fn ra_callee() {
         let m = lower(
             "fn fib(n: i64) -> i64:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\n",
         );
@@ -1960,7 +1960,7 @@ mod tests {
     }
 
     #[test]
-    fn regalloc_prefers_volatile() {
+    fn ra_volatile() {
         let m = lower("fn add(a: i64, b: i64) -> i64:\n    return a + b\n");
         let ra = regalloc(&m);
         assert!(

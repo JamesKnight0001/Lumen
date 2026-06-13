@@ -1784,7 +1784,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_not_int() {
+    fn mixed_notint() {
 
         let src =
             "fn dbl(x):\n    return x + x\nfn main():\n    print(dbl(1))\n    print(dbl(1.5))\n";
@@ -1796,7 +1796,7 @@ mod tests {
     }
 
     #[test]
-    fn reassigned_not_int() {
+    fn reasn_notint() {
         let src = "fn main():\n    let v = 10\n    v = 2.5\n    print(v)\n";
         let i = info(src);
         assert!(
@@ -1806,7 +1806,7 @@ mod tests {
     }
 
     #[test]
-    fn pure_int_local() {
+    fn pure_ilocal() {
         let src = "fn main():\n    let a = 5\n    let b = a + 3\n    print(b)\n";
         let i = info(src);
         assert!(i.is_ivar("main", "a"));
@@ -1814,7 +1814,7 @@ mod tests {
     }
 
     #[test]
-    fn comp_not_int() {
+    fn comp_notint() {
 
         let src = "fn dbl(x):\n    return x * 2\nfn main():\n    print([dbl(c) for c in \"ab\"])\n";
         let i = info(src);
@@ -1831,7 +1831,7 @@ mod tests {
     }
 
     #[test]
-    fn escaped_not_int() {
+    fn esc_notint() {
 
         let src = "fn inc(x):\n    return x + 1\nfn apply(f, v):\n    return f(v)\nfn main():\n    print(apply(inc, 5))\n";
         let i = info_lifted(src);
@@ -1842,7 +1842,7 @@ mod tests {
     }
 
     #[test]
-    fn captured_cell_not_int() {
+    fn cap_notint() {
 
         let src = "fn make_rng(seed):\n    let state = seed\n    return fn():\n        state = state + 1\n        return state\nfn main():\n    let r = make_rng(0)\n    print(r())\n";
         let i = info_lifted(src);
@@ -1857,7 +1857,7 @@ mod tests {
     }
 
     #[test]
-    fn method_not_int() {
+    fn meth_notint() {
 
         let src = "fn helper(x):\n    return x + 1\nstruct S:\n    v: int\nimpl S:\n    fn go(self):\n        return helper(self.v)\nfn main():\n    let s = S(v: 3)\n    print(s.go())\n";
         let i = info_lifted(src);
