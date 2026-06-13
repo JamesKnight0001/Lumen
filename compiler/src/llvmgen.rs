@@ -43,6 +43,11 @@ struct Ctx {
     // after the initializer so nested/other allocations stay on the heap.
     arena_now: bool,
     fn_has_arena: bool, // this fn emitted lumen_arena_mark (so rets must reset)
+    // Proven-int locals whose alloca holds a RAW unboxed i64 (not NaN-boxed).
+    // Reads in int context skip the unbox; boxed-context reads box on demand;
+    // stores take the raw value. Mirrors the asm backend's raw_int set. Empty
+    // for try-functions (setjmp hazard) and when LUMEN_NO_RAWSLOT is set.
+    raw_slots: std::collections::HashSet<String>,
 }
 
 impl Default for LlvmGen {
@@ -281,6 +286,13 @@ impl LlvmGen {
             // (an exception unwinds past our ret-time reset; v1 plays safe).
             fn_has_arena: !body_has_try(&f.body)
                 && self.arena.iter().any(|(fname, _)| fname == &f.name),
+            // Raw-int slots: proven-int locals held unboxed. Off for try-functions
+            // (setjmp/volatile-slot hazard) and when LUMEN_NO_RAWSLOT is set.
+            raw_slots: if body_has_try(&f.body) || std::env::var("LUMEN_NO_RAWSLOT").is_ok() {
+                std::collections::HashSet::new()
+            } else {
+                self.info.int_vars.get(&f.name).cloned().unwrap_or_default()
+            },
         };
 
         // signature: i64 (i64 %a0, ...). `self` is already a regular param named
@@ -293,7 +305,17 @@ impl LlvmGen {
             params.push(format!("i64 %a{i}"));
             let slot = format!("%p{i}.slot");
             let _ = writeln!(prologue, "  {slot} = alloca i64");
-            let _ = writeln!(prologue, "  store i64 %a{i}, ptr {slot}");
+            // A raw-int param arrives NaN-boxed on the boxed entry ABI: unbox once
+            // here (wrap48) so the slot holds a plain i64 like other raw slots.
+            if ctx.raw_slots.contains(&p.name) && p.name != "self" {
+                let sh = self.vreg();
+                let sa = self.vreg();
+                let _ = writeln!(prologue, "  {sh} = shl i64 %a{i}, 16");
+                let _ = writeln!(prologue, "  {sa} = ashr i64 {sh}, 16");
+                let _ = writeln!(prologue, "  store i64 {sa}, ptr {slot}");
+            } else {
+                let _ = writeln!(prologue, "  store i64 %a{i}, ptr {slot}");
+            }
             ctx.locals.insert(p.name.clone(), slot.clone());
             if p.name == "self" {
                 ctx.self_slot = Some(slot);
@@ -394,6 +416,22 @@ impl LlvmGen {
                 }
             }
             Stmt::Let { name, value, .. } => {
+                // Raw-int slot: store the unboxed value (eval_int), skipping the
+                // box-on-store / unbox-on-read round trip. Falls back to boxed.
+                if ctx.raw_slots.contains(name) {
+                    let rv = self.eval_int(value, ctx, out)?;
+                    let slot = match ctx.locals.get(name) {
+                        Some(s) => s.clone(),
+                        None => {
+                            let s = format!("%l.{}", sanitize(name));
+                            let _ = writeln!(out, "  {s} = alloca i64");
+                            ctx.locals.insert(name.clone(), s.clone());
+                            s
+                        }
+                    };
+                    let _ = writeln!(out, "  store i64 {rv}, ptr {slot}");
+                    return Ok(());
+                }
                 // If this local is arena-eligible, flag the upcoming literal so it
                 // emits the _arena constructor. Reset right after the initializer.
                 let was = ctx.arena_now;
@@ -413,6 +451,23 @@ impl LlvmGen {
                 let _ = writeln!(out, "  store i64 {v}, ptr {slot}");
             }
             Stmt::Assign { target, value } => {
+                // Raw-int slot target: store the unboxed value directly.
+                if let Expr::Ident(n) = target {
+                    if ctx.raw_slots.contains(n) {
+                        let rv = self.eval_int(value, ctx, out)?;
+                        let slot = match ctx.locals.get(n) {
+                            Some(s) => s.clone(),
+                            None => {
+                                let s = format!("%l.{}", sanitize(n));
+                                let _ = writeln!(out, "  {s} = alloca i64");
+                                ctx.locals.insert(n.clone(), s.clone());
+                                s
+                            }
+                        };
+                        let _ = writeln!(out, "  store i64 {rv}, ptr {slot}");
+                        return Ok(());
+                    }
+                }
                 let v = self.gen_expr(value, ctx, out)?;
                 self.gen_assign(target, &v, ctx, out)?;
             }
@@ -634,9 +689,16 @@ impl LlvmGen {
         let _ = writeln!(out, "  {cmp} = icmp slt i64 {curi}, {limi}");
         let _ = writeln!(out, "  br i1 {cmp}, label %{bodyl}, label %{end}");
         let _ = writeln!(out, "{bodyl}:");
-        let boxed = self.vreg();
-        let _ = writeln!(out, "  {boxed} = call i64 @lumen_from_int(i64 {curi})");
-        let _ = writeln!(out, "  store i64 {boxed}, ptr {vslot}");
+        // raw-int loop var: store the raw counter (curi is already a plain i64),
+        // skipping the per-iteration lumen_from_int box. Boxed-context reads of
+        // the var re-box on demand (gen_expr Ident).
+        if ctx.raw_slots.contains(var) {
+            let _ = writeln!(out, "  store i64 {curi}, ptr {vslot}");
+        } else {
+            let boxed = self.vreg();
+            let _ = writeln!(out, "  {boxed} = call i64 @lumen_from_int(i64 {curi})");
+            let _ = writeln!(out, "  store i64 {boxed}, ptr {vslot}");
+        }
         // skip the GC poll when the body provably can't allocate (tight numeric loop)
         if self.stmts_alloc(body, ctx) || std::env::var("LUMEN_NO_POLLSKIP").is_ok() {
             self.gc_poll(out);
@@ -716,7 +778,14 @@ impl LlvmGen {
         let _ = writeln!(out, "  {l2} = load i64, ptr {lslot}");
         let el = self.vreg();
         let _ = writeln!(out, "  {el} = call i64 @lumen_list_get(i64 {l2}, i64 {i})");
-        let _ = writeln!(out, "  store i64 {el}, ptr {vslot}");
+        // raw-int loop var: the element is a NaN-boxed int; unbox before storing
+        // so the slot holds a plain i64 consistent with raw_slots reads.
+        if ctx.raw_slots.contains(var) {
+            let u = self.unbox_int(&el, out);
+            let _ = writeln!(out, "  store i64 {u}, ptr {vslot}");
+        } else {
+            let _ = writeln!(out, "  store i64 {el}, ptr {vslot}");
+        }
         if self.stmts_alloc(body, ctx) || std::env::var("LUMEN_NO_POLLSKIP").is_ok() {
             self.gc_poll(out);
         }
@@ -975,9 +1044,16 @@ impl LlvmGen {
             Expr::FStr(parts) => self.gen_fstring(parts, ctx, out),
             Expr::Ident(n) => {
                 if let Some(slot) = ctx.locals.get(n) {
+                    let slot = slot.clone();
                     let r = self.vreg();
                     let _ = writeln!(out, "  {r} = load i64, ptr {slot}");
-                    Ok(r)
+                    // raw-int slot holds a plain i64; a boxed-context read must
+                    // re-box it into a NaN-boxed LumenVal.
+                    if ctx.raw_slots.contains(n) {
+                        Ok(self.box_int(&r, out))
+                    } else {
+                        Ok(r)
+                    }
                 } else if self.fns.contains_key(n) {
                     // bare function reference -> closure with 0 captures
                     self.gen_closure(n, &[], ctx, out)
@@ -1335,6 +1411,13 @@ impl LlvmGen {
     fn eval_int(&mut self, e: &Expr, ctx: &mut Ctx, out: &mut String) -> Result<String, String> {
         match e {
             Expr::Int(n) => Ok(format!("{n}")),
+            // raw-int slot: the alloca already holds a plain i64, load it directly
+            Expr::Ident(n) if ctx.raw_slots.contains(n) && ctx.locals.contains_key(n) => {
+                let slot = ctx.locals.get(n).unwrap().clone();
+                let r = self.vreg();
+                let _ = writeln!(out, "  {r} = load i64, ptr {slot}");
+                Ok(r)
+            }
             Expr::Unary { op: UnOp::Neg, expr } => {
                 let a = self.eval_int(expr, ctx, out)?;
                 let r = self.vreg();
