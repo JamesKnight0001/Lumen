@@ -96,7 +96,7 @@ impl LlvmGen {
     // `memory(none) willreturn nounwind`: they read/write no memory and always
     // return, so LLVM may DCE dead boxes (e.g. a loop counter the body ignores),
     // hoist loop-invariant boxes, and fold box/unbox pairs. Sound: these are pure
-    // bit-twiddling in lumen_rt.c. Only conversions are listed — never anything
+    // bit-twiddling in lumen_rt.c. Only conversions are listed - never anything
     // that allocates (lumen_list_new), can raise (lumen_to_int_val), or prints.
     fn need(&mut self, sym: &str, sig: &str) {
         if self.declared.insert(sym.to_string()) {
