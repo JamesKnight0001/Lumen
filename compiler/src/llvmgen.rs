@@ -87,9 +87,28 @@ impl LlvmGen {
     }
 
     // Record a `declare` once. sig is the full text after `declare `.
+    // Pure value-conversion helpers (NaN-box ↔ raw int/double) are tagged
+    // `memory(none) willreturn nounwind`: they read/write no memory and always
+    // return, so LLVM may DCE dead boxes (e.g. a loop counter the body ignores),
+    // hoist loop-invariant boxes, and fold box/unbox pairs. Sound: these are pure
+    // bit-twiddling in lumen_rt.c. Only conversions are listed — never anything
+    // that allocates (lumen_list_new), can raise (lumen_to_int_val), or prints.
     fn need(&mut self, sym: &str, sig: &str) {
         if self.declared.insert(sym.to_string()) {
-            let _ = writeln!(self.decls, "declare {sig}");
+            let pure = matches!(
+                sym,
+                "lumen_from_int"
+                    | "lumen_to_int"
+                    | "lumen_from_double"
+                    | "lumen_to_double"
+                    | "lumen_bool"
+                    | "lumen_nil"
+            );
+            if pure {
+                let _ = writeln!(self.decls, "declare {sig} memory(none) willreturn nounwind");
+            } else {
+                let _ = writeln!(self.decls, "declare {sig}");
+            }
         }
     }
 
