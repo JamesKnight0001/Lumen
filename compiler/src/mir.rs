@@ -259,8 +259,8 @@ pub struct MirFn {
     pub name: String,
     pub n_params: u32,
 
-    pub param_is_float: Vec<bool>,
-    pub ret_is_float: bool,
+    pub param_float: Vec<bool>,
+    pub ret_float: bool,
     pub entry: BlockId,
     pub blocks: Vec<Block>,
     pub next_vreg: Vreg,
@@ -269,13 +269,13 @@ pub struct MirFn {
 }
 
 impl MirFn {
-    pub fn new(name: impl Into<String>, param_is_float: Vec<bool>, ret_is_float: bool) -> MirFn {
-        let n_params = param_is_float.len() as u32;
+    pub fn new(name: impl Into<String>, param_float: Vec<bool>, ret_float: bool) -> MirFn {
+        let n_params = param_float.len() as u32;
         MirFn {
             name: name.into(),
             n_params,
-            param_is_float,
-            ret_is_float,
+            param_float,
+            ret_float,
             entry: 0,
             blocks: Vec::new(),
             next_vreg: 0,
@@ -372,7 +372,7 @@ impl Dom {
 
 #[derive(Default)]
 pub struct SigMap {
-    pub ret_is_float: HashMap<String, bool>,
+    pub ret_float: HashMap<String, bool>,
 }
 
 impl SigMap {
@@ -384,9 +384,9 @@ impl SigMap {
                 if !f.is_method {
                     if let crate::ast::Type::Named(n) = &f.ret {
                         if n == "f64" {
-                            m.ret_is_float.insert(f.name.clone(), true);
+                            m.ret_float.insert(f.name.clone(), true);
                         } else if n == "i64" {
-                            m.ret_is_float.insert(f.name.clone(), false);
+                            m.ret_float.insert(f.name.clone(), false);
                         }
                     }
                 }
@@ -418,12 +418,12 @@ struct Lowerer<'a> {
 }
 
 impl<'a> Lowerer<'a> {
-    fn new(name: &str, params: &[crate::ast::Param], ret_is_float: bool, sigs: &'a SigMap) -> Self {
-        let param_is_float: Vec<bool> = params
+    fn new(name: &str, params: &[crate::ast::Param], ret_float: bool, sigs: &'a SigMap) -> Self {
+        let param_float: Vec<bool> = params
             .iter()
             .map(|p| matches!(&p.ty, crate::ast::Type::Named(n) if n == "f64"))
             .collect();
-        let mut f = MirFn::new(name, param_is_float.clone(), ret_is_float);
+        let mut f = MirFn::new(name, param_float.clone(), ret_float);
         let entry = f.new_block();
         f.entry = entry;
         let mut lw = Lowerer {
@@ -442,7 +442,7 @@ impl<'a> Lowerer<'a> {
         lw.sealed.insert(entry);
 
         for (i, p) in params.iter().enumerate() {
-            let dom = if param_is_float[i] {
+            let dom = if param_float[i] {
                 Dom::Float
             } else {
                 Dom::Int
@@ -722,7 +722,7 @@ impl<'a> Lowerer<'a> {
             },
             Expr::Call { callee, .. } => {
                 if let Expr::Ident(n) = &**callee {
-                    if self.sigs.ret_is_float.get(n).copied().unwrap_or(false) {
+                    if self.sigs.ret_float.get(n).copied().unwrap_or(false) {
                         return Dom::Float;
                     }
                 }
@@ -781,7 +781,7 @@ impl<'a> Lowerer<'a> {
                     _ => unreachable!("gate admits only direct-name calls"),
                 };
                 let arg_vals: Vec<Val> = args.iter().map(|a| self.lower_expr(a)).collect();
-                let is_float = self.sigs.ret_is_float.get(&name).copied().unwrap_or(false);
+                let is_float = self.sigs.ret_float.get(&name).copied().unwrap_or(false);
                 let dst = self.f.fresh_vreg();
                 self.emit(Inst::Call {
                     dst,
@@ -1191,7 +1191,7 @@ impl<'a> Lowerer<'a> {
     fn finish(mut self) -> MirFn {
 
         if let Some(b) = self.cur.take() {
-            let v = if self.f.ret_is_float {
+            let v = if self.f.ret_float {
                 Val::float(0.0)
             } else {
                 Val::IntConst(0)
@@ -1214,8 +1214,8 @@ fn const_int(e: &Expr) -> Option<i64> {
 }
 
 pub fn lower_fn(f: &FnDef, sigs: &SigMap) -> Result<MirFn, String> {
-    let ret_is_float = matches!(&f.ret, crate::ast::Type::Named(n) if n == "f64");
-    let mut lw = Lowerer::new(&f.name, &f.params, ret_is_float, sigs);
+    let ret_float = matches!(&f.ret, crate::ast::Type::Named(n) if n == "f64");
+    let mut lw = Lowerer::new(&f.name, &f.params, ret_float, sigs);
     lw.lower_block(&f.body);
     let mir = lw.finish();
     mir.validate()?;
@@ -1235,7 +1235,7 @@ pub struct RegAlloc {
 
     pub loc: std::collections::HashMap<Vreg, Loc>,
 
-    pub callee_saved_used: Vec<&'static str>,
+    pub saved_regs: Vec<&'static str>,
 }
 
 impl RegAlloc {
@@ -1476,7 +1476,7 @@ pub fn regalloc(mir: &MirFn) -> RegAlloc {
         }
     }
 
-    ra.callee_saved_used = MIR_CALLEE
+    ra.saved_regs = MIR_CALLEE
         .iter()
         .copied()
         .filter(|r| callee_used.contains(r))
@@ -1718,7 +1718,7 @@ mod tests {
         let m = lower("fn add(a: i64, b: i64) -> i64:\n    return a + b\n");
         assert!(m.validate().is_ok());
         assert_eq!(m.n_params, 2);
-        assert!(!m.ret_is_float);
+        assert!(!m.ret_float);
         assert_eq!(count_phis(&m), 0);
 
         let adds: Vec<_> = m
@@ -1746,7 +1746,7 @@ mod tests {
     #[test]
     fn float_add() {
         let m = lower("fn fadd(a: f64, b: f64) -> f64:\n    return a + b\n");
-        assert!(m.ret_is_float);
+        assert!(m.ret_float);
         let has_fadd = m.blocks.iter().flat_map(|b| &b.insts).any(|i| {
             matches!(
                 i,
@@ -1942,7 +1942,7 @@ mod tests {
                 })
                 .collect();
             let reported: std::collections::HashSet<&str> =
-                ra.callee_saved_used.iter().copied().collect();
+                ra.saved_regs.iter().copied().collect();
             assert_eq!(assigned_callee, reported, "callee set mismatch in: {src}");
         }
     }
@@ -1954,7 +1954,7 @@ mod tests {
         );
         let ra = regalloc(&m);
         assert!(
-            !ra.callee_saved_used.is_empty(),
+            !ra.saved_regs.is_empty(),
             "fib should park a cross-call value in a callee-saved register"
         );
     }
@@ -1964,7 +1964,7 @@ mod tests {
         let m = lower("fn add(a: i64, b: i64) -> i64:\n    return a + b\n");
         let ra = regalloc(&m);
         assert!(
-            ra.callee_saved_used.is_empty(),
+            ra.saved_regs.is_empty(),
             "call-free fn should not need callee-saved registers"
         );
     }

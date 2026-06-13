@@ -23,7 +23,7 @@ pub struct Codegen {
     field_tables: String,
     int_info: IntInfo,
 
-    raw_entry_fns: std::collections::HashSet<String>,
+    raw_fns: std::collections::HashSet<String>,
 
     mir_sigs: crate::mir::SigMap,
 
@@ -50,7 +50,7 @@ struct FnCtx {
     next_callee: usize,
 
     float_loc: std::collections::HashMap<String, &'static str>,
-    float_xmm_saves: Vec<(&'static str, i32)>,
+    xmm_saves: Vec<(&'static str, i32)>,
     next_xmm: usize,
 
     int_loc: std::collections::HashMap<String, String>,
@@ -92,7 +92,7 @@ impl Codegen {
             methods: HashMap::new(),
             field_tables: String::new(),
             int_info: IntInfo::default(),
-            raw_entry_fns: std::collections::HashSet::new(),
+            raw_fns: std::collections::HashSet::new(),
             mir_sigs: crate::mir::SigMap::default(),
             cur_line: 0,
         }
@@ -247,7 +247,7 @@ impl Codegen {
         // A function gets a second ".raw" entry point (unboxed Win64 ABI: ints in
         // registers, no NaN-box) when both its params and return are proven int.
         // Raw callers jump straight to it and skip all the box/unbox churn.
-        self.raw_entry_fns = fns
+        self.raw_fns = fns
             .iter()
             .filter(|f| {
                 !f.is_method
@@ -264,7 +264,7 @@ impl Codegen {
             out.push_str(&body);
             out.push('\n');
 
-            if self.raw_entry_fns.contains(&f.name) {
+            if self.raw_fns.contains(&f.name) {
                 let raw = self.gen_raw(&Self::fnsym_raw(&f.name), f)?;
                 out.push_str(&raw);
                 out.push('\n');
@@ -531,7 +531,7 @@ impl Codegen {
 
         ctx.stack_size += 16;
         let slot = -ctx.stack_size;
-        ctx.float_xmm_saves.push((reg, slot));
+        ctx.xmm_saves.push((reg, slot));
         Some(reg)
     }
 
@@ -578,7 +578,7 @@ impl Codegen {
                 .map(|i| arg_regs[i])
         };
 
-        let ret_to_rax = |out: &mut String| -> bool {
+        let ret_rax = |out: &mut String| -> bool {
             match ret_expr {
                 Expr::Ident(n) => match param_reg(n) {
                     Some(r) => {
@@ -616,7 +616,7 @@ impl Codegen {
         let mut fast = String::new();
         let _ = writeln!(fast, "    cmp {lhs_reg}, {rhs_str}");
         let _ = writeln!(fast, "    {jcc_false} {skip}");
-        if !ret_to_rax(&mut fast) {
+        if !ret_rax(&mut fast) {
             return None;
         }
         fast.push_str("    ret\n");
@@ -760,7 +760,7 @@ impl Codegen {
                         callee_saves: Vec::new(),
                         next_callee: 0,
                         float_loc: std::collections::HashMap::new(),
-                        float_xmm_saves: Vec::new(),
+                        xmm_saves: Vec::new(),
                         next_xmm: 0,
                         int_loc: std::collections::HashMap::new(),
                     };
@@ -783,7 +783,7 @@ impl Codegen {
 
                         let mut save = String::new();
                         let mut restore = String::new();
-                        for reg in &ra.callee_saved_used {
+                        for reg in &ra.saved_regs {
                             mctx.stack_size += 8;
                             let slot = -mctx.stack_size;
                             let _ = writeln!(save, "    mov [rbp{slot}], {reg}");
@@ -841,7 +841,7 @@ impl Codegen {
             callee_saves: Vec::new(),
             next_callee: 0,
             float_loc: std::collections::HashMap::new(),
-            float_xmm_saves: Vec::new(),
+            xmm_saves: Vec::new(),
             next_xmm: 0,
             int_loc: std::collections::HashMap::new(),
         };
@@ -929,7 +929,7 @@ impl Codegen {
             let _ = writeln!(out, "    mov [rbp{slot}], {reg}");
         }
 
-        for (reg, slot) in &ctx.float_xmm_saves {
+        for (reg, slot) in &ctx.xmm_saves {
             let _ = writeln!(out, "    movdqu [rbp{slot}], {reg}");
         }
         out.push_str(&prologue);
@@ -941,13 +941,13 @@ impl Codegen {
             out.push_str("    call lumen_nil\n    mov rsp, rbp\n    pop rbp\n    ret\n");
         }
 
-        if !ctx.callee_saves.is_empty() || !ctx.float_xmm_saves.is_empty() {
+        if !ctx.callee_saves.is_empty() || !ctx.xmm_saves.is_empty() {
             let mut restore = String::new();
             for (reg, slot) in ctx.callee_saves.iter().rev() {
                 let _ = writeln!(restore, "    mov {reg}, [rbp{slot}]");
             }
 
-            for (reg, slot) in ctx.float_xmm_saves.iter().rev() {
+            for (reg, slot) in ctx.xmm_saves.iter().rev() {
                 let _ = writeln!(restore, "    movdqu {reg}, [rbp{slot}]");
             }
             let ret_seq = "    mov rsp, rbp\n    pop rbp\n    ret\n";
@@ -1354,13 +1354,13 @@ impl Codegen {
             }
         }
         int_promoted.sort();
-        let mut int_promoted_active: Vec<(String, &'static str, i32)> = Vec::new();
+        let mut promo_on: Vec<(String, &'static str, i32)> = Vec::new();
         for v in &int_promoted {
             if let Some(reg) = self.take_callee(ctx) {
                 let off = *ctx.locals.get(v).expect("raw-int local has a slot");
                 let _ = writeln!(out, "    mov {reg}, [rbp{off}]");
                 ctx.int_loc.insert(v.clone(), reg.to_string());
-                int_promoted_active.push((v.clone(), reg, off));
+                promo_on.push((v.clone(), reg, off));
             }
         }
 
@@ -1416,7 +1416,7 @@ impl Codegen {
             let _ = writeln!(out, "    movsd qword ptr [rbp{off}], {reg}");
             ctx.float_loc.remove(v);
         }
-        for (v, reg, off) in &int_promoted_active {
+        for (v, reg, off) in &promo_on {
             let _ = writeln!(out, "    mov [rbp{off}], {reg}");
             ctx.int_loc.remove(v);
         }
@@ -2370,7 +2370,7 @@ impl Codegen {
                     if self.int_info.int_ret.contains(n)) =>
             {
                 if let Expr::Ident(n) = &**callee {
-                    if self.raw_entry_fns.contains(n)
+                    if self.raw_fns.contains(n)
                         && self
                             .fns
                             .get(n)
@@ -2761,7 +2761,7 @@ impl Codegen {
             out.push_str("    call lumen_nil\n");
             return Ok(());
         }
-        let one_arg_method: Option<&str> = match name {
+        let arg1_method: Option<&str> = match name {
             "upper" => Some("lumen_str_upper"),
             "lower" => Some("lumen_str_lower"),
             "trim" => Some("lumen_str_trim"),
@@ -2773,7 +2773,7 @@ impl Codegen {
             "values" => Some("lumen_map_values"),
             _ => None,
         };
-        if let Some(rt) = one_arg_method {
+        if let Some(rt) = arg1_method {
             self.gen_expr(obj, ctx, out)?;
             out.push_str("    mov rcx, rax\n");
             let _ = writeln!(out, "    call {rt}");
@@ -2801,7 +2801,7 @@ impl Codegen {
             return Ok(());
         }
 
-        let two_arg_method: Option<&str> = match name {
+        let arg2_method: Option<&str> = match name {
             "split" => Some("lumen_str_split"),
             "contains" => Some("lumen_contains"),
             "starts_with" => Some("lumen_str_starts_with"),
@@ -2817,13 +2817,13 @@ impl Codegen {
             "count" => Some("lumen_list_count"),
             _ => None,
         };
-        let two_arg_method = match two_arg_method {
+        let arg2_method = match arg2_method {
             Some(rt) if name == "insert" && args.len() == 2 => Some(rt),
             Some(rt) if name == "replace" && args.len() == 2 => Some(rt),
             Some(rt) if name != "insert" && name != "replace" && args.len() == 1 => Some(rt),
             _ => None,
         };
-        if let Some(rt) = two_arg_method {
+        if let Some(rt) = arg2_method {
 
             self.gen_expr(obj, ctx, out)?;
             let r = self.temp(ctx);
@@ -3174,7 +3174,7 @@ impl Codegen {
 
     fn mir_allint(mir: &crate::mir::MirFn) -> bool {
         use crate::mir::Inst;
-        if mir.ret_is_float || mir.param_is_float.iter().any(|&f| f) {
+        if mir.ret_float || mir.param_float.iter().any(|&f| f) {
             return false;
         }
         for b in &mir.blocks {

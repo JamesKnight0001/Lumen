@@ -1029,10 +1029,10 @@ impl Interp {
 
                             let bytes = s.as_bytes();
                             let mut out = String::with_capacity(s.len());
-                            let mut at_word_start = true;
+                            let mut at_wstart = true;
                             for &b in bytes {
                                 let is_ws = b == b' ' || b == b'\t' || b == b'\n' || b == b'\r';
-                                let c = if at_word_start {
+                                let c = if at_wstart {
                                     if b.is_ascii_lowercase() {
                                         b - 32
                                     } else {
@@ -1044,7 +1044,7 @@ impl Interp {
                                     b
                                 };
                                 out.push(c as char);
-                                at_word_start = is_ws;
+                                at_wstart = is_ws;
                             }
                             return Ok(Value::Str(Rc::new(out)));
                         }

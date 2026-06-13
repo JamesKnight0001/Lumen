@@ -42,7 +42,7 @@ struct Ctx {
     // this holds Some(true) so the literal emits the _arena constructor. Reset
     // after the initializer so nested/other allocations stay on the heap.
     arena_now: bool,
-    fn_has_arena: bool, // this fn emitted lumen_arena_mark (so rets must reset)
+    has_arena: bool, // this fn emitted lumen_arena_mark (so rets must reset)
     // Proven-int locals whose alloca holds a RAW unboxed i64 (not NaN-boxed).
     // Reads in int context skip the unbox; boxed-context reads box on demand;
     // stores take the raw value. Mirrors the asm backend's raw_int set. Empty
@@ -284,7 +284,7 @@ impl LlvmGen {
             arena_now: false,
             // arena only if this fn has at least one eligible local AND no try
             // (an exception unwinds past our ret-time reset; v1 plays safe).
-            fn_has_arena: !has_trybody(&f.body)
+            has_arena: !has_trybody(&f.body)
                 && self.arena.iter().any(|(fname, _)| fname == &f.name),
             // Raw-int slots: proven-int locals held unboxed. Off for try-functions
             // (setjmp/volatile-slot hazard) and when LUMEN_NO_RAWSLOT is set.
@@ -329,7 +329,7 @@ impl LlvmGen {
         b.push_str(&prologue);
         // Arena frame: mark on entry, reset before every ret. The token lives in
         // a fixed alloca so all rets can load it.
-        if ctx.fn_has_arena {
+        if ctx.has_arena {
             self.need("lumen_arena_mark", "i64 @lumen_arena_mark()");
             self.need("lumen_arena_reset", "void @lumen_arena_reset(i64)");
             b.push_str("  %arena.tok = alloca i64\n");
@@ -378,7 +378,7 @@ impl LlvmGen {
             self.need("lumen_nil", "i64 @lumen_nil()");
             let n = self.vreg();
             let _ = writeln!(b, "  {n} = call i64 @lumen_nil()");
-            if ctx.fn_has_arena {
+            if ctx.has_arena {
                 b.push_str("  %arena.r0 = load i64, ptr %arena.tok\n");
                 b.push_str("  call void @lumen_arena_reset(i64 %arena.r0)\n");
             }
@@ -436,7 +436,7 @@ impl LlvmGen {
                 // emits the _arena constructor. Reset right after the initializer.
                 let was = ctx.arena_now;
                 ctx.arena_now =
-                    ctx.fn_has_arena && self.arena.contains(&(ctx.func.clone(), name.clone()));
+                    ctx.has_arena && self.arena.contains(&(ctx.func.clone(), name.clone()));
                 let v = self.gen_expr(value, ctx, out)?;
                 ctx.arena_now = was;
                 let slot = match ctx.locals.get(name) {
@@ -486,7 +486,7 @@ impl LlvmGen {
                 };
                 // free this frame's arena objects before returning. Safe: escape
                 // analysis guarantees no arena local is the returned value.
-                if ctx.fn_has_arena {
+                if ctx.has_arena {
                     let t = self.vreg();
                     let _ = writeln!(out, "  {t} = load i64, ptr %arena.tok");
                     let _ = writeln!(out, "  call void @lumen_arena_reset(i64 {t})");

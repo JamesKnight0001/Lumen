@@ -215,8 +215,8 @@ fn rewrite_expr(
     // a plain Call to `foo`, since imports share one flat namespace.
     if let Expr::Method { obj, name, args } = e {
         if let Expr::Ident(m) = obj.as_ref() {
-            let is_module_alias = aliases.contains_key(m) && !is_builtin(m);
-            if is_module_alias {
+            let is_modalias = aliases.contains_key(m) && !is_builtin(m);
+            if is_modalias {
                 let mut new_args = std::mem::take(args);
                 for a in new_args.iter_mut() {
                     rewrite_expr(aliases, is_builtin, a);

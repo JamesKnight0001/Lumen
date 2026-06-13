@@ -145,7 +145,7 @@ fn com_vcall(obj: i64, slot: i64, args: &[u8], ret_kind: i64) -> Result<Value, S
 }
 
 #[cfg(not(windows))]
-fn com_vcall(_obj: i64, _slot: i64, _args: &[u8], _ret_kind: i64) -> Result<Value, String> {
+fn com_vcall(_obj: i64, _slot: i64, _args: &[u8], _rkind: i64) -> Result<Value, String> {
     Err("vcall: COM/vtable calls are only supported on Windows".into())
 }
 
@@ -155,10 +155,10 @@ fn com_vcall(_obj: i64, _slot: i64, _args: &[u8], _ret_kind: i64) -> Result<Valu
 fn fmt_epoch(epoch_secs: i64) -> String {
 
     let days = epoch_secs.div_euclid(86_400);
-    let secs_of_day = epoch_secs.rem_euclid(86_400);
-    let hour = secs_of_day / 3600;
-    let min = (secs_of_day % 3600) / 60;
-    let sec = secs_of_day % 60;
+    let day_secs = epoch_secs.rem_euclid(86_400);
+    let hour = day_secs / 3600;
+    let min = (day_secs % 3600) / 60;
+    let sec = day_secs % 60;
 
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;

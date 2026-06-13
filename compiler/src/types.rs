@@ -22,13 +22,13 @@ pub struct IntInfo {
 
     pub float_ret: HashSet<String>,
 
-    pub float_list_vars: HashMap<String, HashSet<String>>,
+    pub flvars: HashMap<String, HashSet<String>>,
 
-    pub float_list_ret: HashSet<String>,
+    pub flret: HashSet<String>,
 
-    pub int_list_vars: HashMap<String, HashSet<String>>,
+    pub ilvars: HashMap<String, HashSet<String>>,
 
-    pub int_list_ret: HashSet<String>,
+    pub ilret: HashSet<String>,
 }
 
 impl IntInfo {
@@ -39,12 +39,12 @@ impl IntInfo {
         self.float_vars.get(func).is_some_and(|s| s.contains(name))
     }
     pub fn is_flist(&self, func: &str, name: &str) -> bool {
-        self.float_list_vars
+        self.flvars
             .get(func)
             .is_some_and(|s| s.contains(name))
     }
     pub fn is_ilist(&self, func: &str, name: &str) -> bool {
-        self.int_list_vars
+        self.ilvars
             .get(func)
             .is_some_and(|s| s.contains(name))
     }
@@ -121,14 +121,14 @@ pub fn analyze(prog: &Program) -> IntInfo {
     // index into a proven int-list (a[i]) is itself an int that feeds scalar-int
     // facts. Both are greatest-fixpoint (seed optimistic, only ever remove), so a
     // shared loop converges soundly. Seeded here so the first round can see them.
-    let mut int_list_vars: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut ilvars: HashMap<String, HashSet<String>> = HashMap::new();
     for f in &fns {
         let mut vars: HashSet<String> = f.params.iter().cloned().collect();
         seed_vars(f.body, &mut vars);
-        int_list_vars.insert(f.name.clone(), vars);
+        ilvars.insert(f.name.clone(), vars);
     }
     for fname in escaped.iter().chain(method_reached.iter()) {
-        if let Some(set) = int_list_vars.get_mut(fname) {
+        if let Some(set) = ilvars.get_mut(fname) {
             if let Some(f) = fns.iter().find(|f| &f.name == fname) {
                 for p in &f.params {
                     set.remove(p);
@@ -136,7 +136,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
             }
         }
     }
-    let mut int_list_ret: HashSet<String> = fn_names.clone();
+    let mut ilret: HashSet<String> = fn_names.clone();
     // Shared per-function use facts (bad_use / pushes / index_stores). Element-type
     // agnostic, so int-list and float-list both read them.
     let mut ilist_facts: HashMap<String, FlistFacts> = HashMap::new();
@@ -150,7 +150,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
         let mut changed = false;
         let vsnap = int_vars.clone();
         let rsnap = int_ret.clone();
-        let ilsnap = int_list_vars.clone();
+        let ilsnap = ilvars.clone();
 
         for f in &fns {
             let mut assigns: Vec<(String, ValSrc)> = Vec::new();
@@ -208,7 +208,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
             let facts = ilist_facts.get(&f.name).unwrap();
             let mut assigns: Vec<(String, ValSrc)> = Vec::new();
             assignments(f.body, &mut assigns);
-            let cur = int_list_vars.get(&f.name).unwrap().clone();
+            let cur = ilvars.get(&f.name).unwrap().clone();
             let mut to_drop: Vec<String> = Vec::new();
             for v in &cur {
                 if facts.bad_use.contains(v) {
@@ -252,7 +252,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                 }
             }
             if !to_drop.is_empty() {
-                let m = int_list_vars.get_mut(&f.name).unwrap();
+                let m = ilvars.get_mut(&f.name).unwrap();
                 for v in to_drop {
                     m.remove(&v);
                     changed = true;
@@ -265,7 +265,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                 continue;
             };
             for (k, pname) in params.iter().enumerate() {
-                if !int_list_vars
+                if !ilvars
                     .get(&cs.callee)
                     .map(|s| s.contains(pname))
                     .unwrap_or(false)
@@ -275,20 +275,20 @@ pub fn analyze(prog: &Program) -> IntInfo {
                 let arg_ok = cs
                     .args
                     .get(k)
-                    .map(|a| ilist_val(a, &cs.caller, &ilsnap, &int_list_ret, &fn_names))
+                    .map(|a| ilist_val(a, &cs.caller, &ilsnap, &ilret, &fn_names))
                     .unwrap_or(false);
                 if !arg_ok {
-                    int_list_vars.get_mut(&cs.callee).unwrap().remove(pname);
+                    ilvars.get_mut(&cs.callee).unwrap().remove(pname);
                     changed = true;
                 }
             }
         }
 
         for f in &fns {
-            if int_list_ret.contains(&f.name)
-                && !returns_ilist(f.body, &f.name, &int_list_vars, &int_list_ret, &fn_names)
+            if ilret.contains(&f.name)
+                && !returns_ilist(f.body, &f.name, &ilvars, &ilret, &fn_names)
             {
-                int_list_ret.remove(&f.name);
+                ilret.remove(&f.name);
                 changed = true;
             }
         }
@@ -329,15 +329,15 @@ pub fn analyze(prog: &Program) -> IntInfo {
     }
     let mut float_ret: HashSet<String> = fn_names.clone();
 
-    let mut float_list_vars: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut flvars: HashMap<String, HashSet<String>> = HashMap::new();
     for f in &fns {
         let mut vars: HashSet<String> = f.params.iter().cloned().collect();
         seed_vars(f.body, &mut vars);
-        float_list_vars.insert(f.name.clone(), vars);
+        flvars.insert(f.name.clone(), vars);
     }
 
     for fname in escaped.iter().chain(method_reached.iter()) {
-        if let Some(set) = float_list_vars.get_mut(fname) {
+        if let Some(set) = flvars.get_mut(fname) {
             if let Some(f) = fns.iter().find(|f| &f.name == fname) {
                 for p in &f.params {
                     set.remove(p);
@@ -345,7 +345,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
             }
         }
     }
-    let mut float_list_ret: HashSet<String> = fn_names.clone();
+    let mut flret: HashSet<String> = fn_names.clone();
 
     // Per-function float-list facts (any unsafe use, every push arg, every
     // indexed-store value). Drives the float-list verdict below.
@@ -358,7 +358,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
         let mut changed = false;
         let vsnap = float_vars.clone();
         let rsnap = float_ret.clone();
-        let lsnap = float_list_vars.clone();
+        let lsnap = flvars.clone();
 
         for f in &fns {
             let mut assigns: Vec<(String, ValSrc)> = Vec::new();
@@ -423,7 +423,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
             let facts = flist_facts.get(&f.name).unwrap();
             let mut assigns: Vec<(String, ValSrc)> = Vec::new();
             assignments(f.body, &mut assigns);
-            let cur = float_list_vars.get(&f.name).unwrap().clone();
+            let cur = flvars.get(&f.name).unwrap().clone();
             let mut to_drop: Vec<String> = Vec::new();
             for v in &cur {
                 // Any non-allowlisted use (escape, mixed op, etc.) disqualifies it.
@@ -468,7 +468,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                 }
             }
             if !to_drop.is_empty() {
-                let m = float_list_vars.get_mut(&f.name).unwrap();
+                let m = flvars.get_mut(&f.name).unwrap();
                 for v in to_drop {
                     m.remove(&v);
                     changed = true;
@@ -481,7 +481,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                 continue;
             };
             for (k, pname) in params.iter().enumerate() {
-                if !float_list_vars
+                if !flvars
                     .get(&cs.callee)
                     .map(|s| s.contains(pname))
                     .unwrap_or(false)
@@ -492,27 +492,27 @@ pub fn analyze(prog: &Program) -> IntInfo {
                     .args
                     .get(k)
                     .map(|a| {
-                        flist_val(a, &cs.caller, &lsnap, &float_list_ret, &fn_names)
+                        flist_val(a, &cs.caller, &lsnap, &flret, &fn_names)
                     })
                     .unwrap_or(false);
                 if !arg_ok {
-                    float_list_vars.get_mut(&cs.callee).unwrap().remove(pname);
+                    flvars.get_mut(&cs.callee).unwrap().remove(pname);
                     changed = true;
                 }
             }
         }
 
         for f in &fns {
-            if float_list_ret.contains(&f.name)
+            if flret.contains(&f.name)
                 && !returns_flist(
                     f.body,
                     &f.name,
-                    &float_list_vars,
-                    &float_list_ret,
+                    &flvars,
+                    &flret,
                     &fn_names,
                 )
             {
-                float_list_ret.remove(&f.name);
+                flret.remove(&f.name);
                 changed = true;
             }
         }
@@ -526,7 +526,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
     // fixpoint may have left a never-assigned list param in int_vars (params seed
     // optimistically and only assignments disqualify). Strip them so codegen does
     // not treat the list handle as a raw scalar when loading it for a[i].
-    for (fname, lvars) in &int_list_vars {
+    for (fname, lvars) in &ilvars {
         if let Some(ivars) = int_vars.get_mut(fname) {
             for v in lvars {
                 ivars.remove(v);
@@ -539,10 +539,10 @@ pub fn analyze(prog: &Program) -> IntInfo {
         int_ret,
         float_vars,
         float_ret,
-        float_list_vars,
-        float_list_ret,
-        int_list_vars,
-        int_list_ret,
+        flvars,
+        flret,
+        ilvars,
+        ilret,
     }
 }
 
@@ -571,7 +571,7 @@ fn val_int(
 
 // is_iexpr with int-list awareness: a[i] on a proven int-list var is an int.
 // The int-list verdict co-evolves with scalar-int in the same fixpoint loop, so
-// `ilist` is the in-progress int_list_vars snapshot. Conservative on every other
+// `ilist` is the in-progress ilvars snapshot. Conservative on every other
 // shape, matching the strictness the byte-identical contract requires.
 fn is_iexpr(
     e: &Expr,
