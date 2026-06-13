@@ -11,11 +11,11 @@ else:
     print("C")
 ```
 
-`elif` and `else` are both optional. The condition has to be a **bool**: Lumen
-has strict truthiness, so `if 5:` is an error, not a stand-in for "5 is truthy."
-Write the comparison you actually mean (`if count != 0:`, `if name != nil:`). It
-feels picky for about a day, then it quietly catches a whole class of bugs that
-truthy/falsy languages happily let slip through.
+`elif` and `else` are both optional. The condition must be a **bool**: Lumen has
+strict truthiness, so `if 5:` is an error, not a stand-in for "5 is truthy."
+Write the comparison you mean (`if count != 0:`, `if name != nil:`). It feels
+picky at first, then catches a whole class of bugs that truthy/falsy languages
+let slip through.
 
 ## `while`
 
@@ -53,8 +53,8 @@ forms also produce a real list you can store and reuse.
 
 ## `break` and `continue`
 
-Both work in `while` and `for`. `break` leaves the loop entirely; `continue`
-skips to the next iteration.
+Both work in `while` and `for`. `break` leaves the loop; `continue` skips to the
+next iteration.
 
 ```lumen
 for n in 0..100:
@@ -68,19 +68,18 @@ for n in 0..100:
 ## The ternary expression
 
 `value if cond else other` is an *expression*: it evaluates to one of two values,
-and only the chosen branch ever runs. It's the right tool for small inline
-decisions:
+and only the chosen branch runs. The right tool for small inline decisions:
 
 ```lumen
 let label = "even" if n % 2 == 0 else "odd"
 ```
 
-It chains right-to-left, and the result reads like a little decision table:
+It chains right-to-left and reads like a little decision table:
 
 ```lumen
 let grade = "A" if score >= 90 else "B" if score >= 80 else "C"
 ```
 
-For building lists conditionally, reach for
+For building lists conditionally, use
 [list comprehensions](lists.md#list-comprehensions). For bailing out on errors,
 see [errors](errors.md).

@@ -1,7 +1,7 @@
 # Strings
 
-A string is text in double quotes. Indexing into one gives you a one-character
-string back; there's no separate character type to worry about.
+A string is text in double quotes. Indexing gives back a one-character string;
+there's no separate character type.
 
 ```lumen
 let s = "hello"
@@ -12,7 +12,7 @@ print(s[1:4])         # "ell" (a slice - see below)
 
 ## f-strings: interpolation
 
-Prefix a string with `f` and drop any expression inside `{...}`:
+Prefix with `f`, then drop any expression inside `{...}`:
 
 ```lumen
 let name = "World"
@@ -47,9 +47,9 @@ print("  hi  ".trim())             # "hi"  (also: lstrip / rstrip)
 
 ## Slicing
 
-`s[lo:hi]` returns the half-open slice: it includes `lo` and excludes `hi`. Two
-nice touches here: bounds are clamped to the length, and negative indices count
-from the end, so a slice never goes out of range. Either bound can be omitted.
+`s[lo:hi]` returns the half-open slice: it includes `lo` and excludes `hi`.
+Bounds clamp to the length, negative indices count from the end, so a slice
+never goes out of range. Either bound can be omitted.
 
 ```lumen
 let s = "hello"
@@ -74,7 +74,7 @@ print(is_space(" "))   # true
 
 ## Ordering
 
-Strings compare lexicographically, byte by byte, so uppercase sorts before
+Strings compare lexicographically, byte by byte; uppercase sorts before
 lowercase:
 
 ```lumen
@@ -84,14 +84,14 @@ print("Dog" < "dog")        # true
 
 ## Reading input
 
-`input(prompt?)` reads one line from standard input, strips the trailing newline,
-and returns it. At end of file it returns `nil` instead. Pass a prompt and it
-prints that first:
+`input(prompt?)` reads one line from standard input, strips the trailing
+newline, returns it. At end of file it returns `nil`. Pass a prompt to print it
+first:
 
 ```lumen
 let name = input("What is your name? ")
 print(f"Hello, {name}!")
 ```
 
-There's a full method list, with examples and results, over on
+Full method list, with examples and results, on
 [the standard library page](stdlib.md#string-methods).

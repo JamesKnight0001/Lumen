@@ -1,9 +1,8 @@
 # Maps
 
-A map associates keys with values, much like a dictionary. Both keys and values
-can be any type, and here's the part worth remembering: **insertion order is
-preserved**. That means printing and iterating a map are fully deterministic,
-and identical across both backends.
+A map associates keys with values, like a dictionary. Keys and values can be
+any type, and **insertion order is preserved**. So printing and iterating a map
+are fully deterministic and identical across both backends.
 
 ```lumen
 let ages = {"ana": 30, "bo": 25}
@@ -13,7 +12,7 @@ ages["ana"] = 31         # overwrite (keeps the original position)
 print(len(ages))         # 3
 ```
 
-The empty map is `{}`. Integer keys work just as well as string keys:
+The empty map is `{}`. Integer keys work as well as string keys:
 
 ```lumen
 let squares = {1: 1, 2: 4, 3: 9}
@@ -22,7 +21,7 @@ print(squares[2])        # 4
 
 Numeric keys follow the same rule as `==`: an integer and a whole-valued float
 that compare equal are the **same key**, so `m[1]` and `m[1.0]` reach the same
-slot. (Non-whole floats like `1.5` are keys in their own right.)
+slot. (Non-whole floats like `1.5` are distinct keys.)
 
 ```lumen
 let m = {}
@@ -34,9 +33,8 @@ print(len(m))            # 1
 
 ## Safe lookup
 
-Indexing a **missing** key with `m[key]` is an error, plain and simple. So when a
-key might not be there, reach for `get` with a default, or check ahead of time
-with `has`:
+Indexing a **missing** key with `m[key]` is an error. When a key might not be
+there, use `get` with a default, or check first with `has`:
 
 ```lumen
 let ages = {"ana": 31}
@@ -56,7 +54,7 @@ print(ages.remove("bo")) # 25    (deletes the key, returns its value)
 
 ## Iterating
 
-`for k in m:` walks the **keys**, always in insertion order:
+`for k in m:` walks the **keys** in insertion order:
 
 ```lumen
 # count word frequencies
@@ -69,5 +67,4 @@ for word in ["a", "b", "a"]:
 print(counts)            # {"a": 2, "b": 1}
 ```
 
-The full method list lives on
-[the standard library page](stdlib.md#map-dictionary-methods).
+Full method list: [the standard library page](stdlib.md#map-dictionary-methods).

@@ -1,13 +1,13 @@
 # The basics: layout, comments, `main`
 
-Before anything else, here's the shape every Lumen file shares. It's a short list.
+Here's the shape every Lumen file shares.
 
 ## Indentation is the structure
 
-Lumen uses the off-side rule, the same way Python does: a block opens after a
-line ending in `:`, and the body is whatever's indented further than that line.
-There are no curly braces and no `end` keyword. The indentation *is* the nesting,
-which means the code can't lie to you about its own structure.
+Lumen uses the off-side rule, like Python: a block opens after a line ending in
+`:`, and the body is whatever's indented further. No curly braces, no `end`
+keyword. The indentation *is* the nesting, so the code can't lie about its own
+structure.
 
 ```lumen
 fn classify(n):
@@ -19,11 +19,11 @@ fn classify(n):
         return "positive"
 ```
 
-Stay consistent within a block. Use spaces, and four of them is the convention.
+Stay consistent within a block. Use spaces; four is the convention.
 
 ## Statements end at the newline
 
-No semicolons here. One statement per line, and the newline does the work.
+No semicolons. One statement per line; the newline ends it.
 
 ```lumen
 let x = 10
@@ -33,7 +33,7 @@ print(x + y)
 
 ## Comments start with `#`
 
-Everything from `#` to the end of the line is ignored. Use them freely.
+Everything from `#` to end of line is ignored. Use them freely.
 
 ```lumen
 let radius = 5        # in metres
@@ -41,8 +41,8 @@ let radius = 5        # in metres
 let area = 3.14159 * radius * radius
 ```
 
-For a comment that spans several lines, wrap it in `#[ ... ]#`. It can run
-across as many lines as you like, and also works inline in the middle of a line.
+For a multi-line comment, wrap it in `#[ ... ]#`. It spans any number of lines
+and also works inline.
 
 ```lumen
 #[ This is a block comment.
@@ -52,18 +52,18 @@ let x = 1 #[ inline note ]# + 2
 
 ## `main` is your entry point
 
-Define a function called `main` and Lumen runs it for you, automatically. You
-never call it yourself.
+Define a function called `main` and Lumen runs it automatically. You never call
+it yourself.
 
 ```lumen
 fn main():
     print("this runs on its own")
 ```
 
-A file *without* a `main` is a **module**: just a bag of definitions other files
-can [import](imports.md). Importing pulls in its functions and types, but it does
-**not** run any top-level code, so a module that happens to define `main` won't
-run it when imported. That's the whole trick.
+A file *without* a `main` is a **module**: a bag of definitions other files can
+[import](imports.md). Importing pulls in its functions and types but does **not**
+run any top-level code, so a module that defines `main` won't run it when
+imported. That's the whole trick.
 
 ## A complete first program
 
