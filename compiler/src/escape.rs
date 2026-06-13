@@ -35,7 +35,6 @@ use std::collections::HashSet;
 /// be arena-allocated. Name-keyed (not ordinal): safe because any binding that is
 /// reassigned or shadowed is disqualified, so the name maps to exactly one alloc.
 pub type ArenaSet = HashSet<(String, String)>;
-
 /// Builtins/methods that never retain their list/map receiver past the call.
 /// Conservative: only names we are sure about.
 fn safe_method(name: &str) -> bool {
@@ -54,22 +53,31 @@ fn safe_builtin(name: &str) -> bool {
 
 pub fn analyze(prog: &Program) -> ArenaSet {
     let mut out = ArenaSet::new();
+    // Struct names: a `let x = Name(...)` where Name is a struct is a fresh
+    // allocation just like a list/map literal.
+    let structs: HashSet<String> = prog
+        .iter()
+        .filter_map(|i| match i {
+            Item::Struct(s) => Some(s.name.clone()),
+            _ => None,
+        })
+        .collect();
     // Only free functions, keyed by name (matches llvmgen's ctx.func and the
     // IntInfo convention). Struct methods are skipped: dispatch can alias their
     // locals in ways this intra-procedural pass can't see, so they stay on the
     // heap - correct, just not optimized.
     for item in prog {
         if let Item::Fn(f) = item {
-            analyze_fn(&f.name, &f.body, &mut out);
+            analyze_fn(&f.name, &f.body, &structs, &mut out);
         }
     }
     out
 }
 
-fn analyze_fn(fname: &str, body: &[Stmt], out: &mut ArenaSet) {
-    // Pass 1: candidate locals = `let x = <fresh list/map/comprehension>`.
+fn analyze_fn(fname: &str, body: &[Stmt], structs: &HashSet<String>, out: &mut ArenaSet) {
+    // Pass 1: candidate locals = `let x = <fresh list/map/comprehension/struct>`.
     let mut candidates: Vec<String> = Vec::new();
-    collect_candidates(body, &mut candidates);
+    collect_candidates(body, structs, &mut candidates);
 
     // Pass 2: a candidate qualifies only if no use escapes and it's bound once.
     for name in &candidates {
@@ -85,32 +93,41 @@ fn analyze_fn(fname: &str, body: &[Stmt], out: &mut ArenaSet) {
     }
 }
 
-/// An expression that allocates a fresh collection we could arena-place.
-fn is_fresh_alloc(e: &Expr) -> bool {
-    matches!(e, Expr::List(_) | Expr::Map(_) | Expr::ListComp { .. })
+/// An expression that allocates a fresh heap object we could arena-place: a
+/// list/map literal, a comprehension, or a struct constructor `Name(...)`.
+fn is_fresh_alloc(e: &Expr, structs: &HashSet<String>) -> bool {
+    match e {
+        Expr::List(_) | Expr::Map(_) | Expr::ListComp { .. } => true,
+        Expr::Call { callee, .. } | Expr::NamedCall { callee, .. } => {
+            matches!(&**callee, Expr::Ident(n) if structs.contains(n))
+        }
+        _ => false,
+    }
 }
 
-fn collect_candidates(body: &[Stmt], out: &mut Vec<String>) {
+fn collect_candidates(body: &[Stmt], structs: &HashSet<String>, out: &mut Vec<String>) {
     for s in body {
         match s {
             Stmt::Let { name, value, .. } => {
-                if is_fresh_alloc(value) {
+                if is_fresh_alloc(value, structs) {
                     out.push(name.clone());
                 }
             }
             Stmt::If { then, elifs, els, .. } => {
-                collect_candidates(then, out);
+                collect_candidates(then, structs, out);
                 for (_, b) in elifs {
-                    collect_candidates(b, out);
+                    collect_candidates(b, structs, out);
                 }
                 if let Some(b) = els {
-                    collect_candidates(b, out);
+                    collect_candidates(b, structs, out);
                 }
             }
-            Stmt::While { body, .. } | Stmt::For { body, .. } => collect_candidates(body, out),
+            Stmt::While { body, .. } | Stmt::For { body, .. } => {
+                collect_candidates(body, structs, out)
+            }
             Stmt::Try { body, catch_body, .. } => {
-                collect_candidates(body, out);
-                collect_candidates(catch_body, out);
+                collect_candidates(body, structs, out);
+                collect_candidates(catch_body, structs, out);
             }
             _ => {}
         }

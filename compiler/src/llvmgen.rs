@@ -1985,7 +1985,16 @@ impl LlvmGen {
         out: &mut String,
     ) -> Result<String, String> {
         let sdef = self.structs.get(name).cloned().ok_or("unknown struct")?;
-        self.need("lumen_struct_new", "i64 @lumen_struct_new(ptr, i64, ptr)");
+        // arena-allocate when this ctor initializes a non-escaping local. Clear
+        // arena_now first so field-value sub-expressions stay on the heap.
+        let arena = ctx.arena_now;
+        ctx.arena_now = false;
+        let ctor = if arena {
+            "lumen_struct_new_arena"
+        } else {
+            "lumen_struct_new"
+        };
+        self.need(ctor, &format!("i64 @{ctor}(ptr, i64, ptr)"));
         self.need("lumen_struct_set", "void @lumen_struct_set(i64, ptr, i64)");
         let nfields = sdef.fields.len();
         // The field-names array MUST outlive this call: lumen_struct_new stores
@@ -2000,7 +2009,7 @@ impl LlvmGen {
         let sv = self.vreg();
         let _ = writeln!(
             out,
-            "  {sv} = call i64 @lumen_struct_new(ptr {np}, i64 {nfields}, ptr {arr})"
+            "  {sv} = call i64 @{ctor}(ptr {np}, i64 {nfields}, ptr {arr})"
         );
         let svslot = self.vreg();
         let _ = writeln!(out, "  {svslot} = alloca i64");
