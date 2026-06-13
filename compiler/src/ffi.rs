@@ -1,4 +1,3 @@
-
 //! Windows-only FFI for the interpreter. Loads DLLs at runtime and calls into
 //! them through two hand-written asm trampolines. The tricky part is the Win64
 //! calling convention: a float arg can arrive in either a GP register or an XMM

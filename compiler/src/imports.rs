@@ -1,4 +1,3 @@
-
 //! Resolves `import` statements: reads each referenced .lm file, parses it, and
 //! splices its top-level fns/structs into the program. Qualified references like
 //! `mymod.foo(x)` are rewritten to bare `foo(x)`. Note the limitation: all

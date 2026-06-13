@@ -1,4 +1,3 @@
-
 //! Lambda lifting. Hoists every lambda into a top-level fn named `__lambda_N`,
 //! turning its free variables into leading parameters and the lambda site into
 //! a Closure (or a bare fn reference when there are no captures). The subtle

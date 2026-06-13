@@ -1,4 +1,3 @@
-
 //! Desugaring pass: rewrites surface conveniences into the small core the
 //! backends understand. Right now it lowers `.map(f)` and `.filter(f)` method
 //! calls into list comprehensions, which a later pass already knows how to emit.

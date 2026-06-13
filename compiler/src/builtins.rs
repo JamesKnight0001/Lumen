@@ -1,4 +1,3 @@
-
 //! Built-in standard-library modules (math, os, rand, time, json, cffi, ...).
 //! The MODULE_FUNCS table near the bottom is the single source of truth: every
 //! entry binds a module.name to its arity, the runtime C symbol, and an `eval`

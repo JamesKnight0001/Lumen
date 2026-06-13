@@ -1,4 +1,3 @@
-
 //! Abstract syntax tree for Lumen. Mostly plain data: the node definitions
 //! the parser builds and every later pass walks. `wrap48` lives here because
 //! both backends need the exact same 48-bit integer wrapping.

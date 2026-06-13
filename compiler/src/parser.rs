@@ -1,4 +1,3 @@
-
 //! Recursive-descent parser with a Pratt (precedence-climbing) expression core.
 //! Statements use the layout tokens from the lexer: a `:` header followed by an
 //! indented block, or a single inline statement. It also sprinkles SrcLine

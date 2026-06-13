@@ -1,4 +1,3 @@
-
 //! Hand-written lexer for Lumen. Turns source bytes into tokens, and crucially
 //! implements the off-side rule: it tracks an indentation stack and emits
 //! synthetic Indent/Dedent/Newline tokens so the parser can treat blocks like
