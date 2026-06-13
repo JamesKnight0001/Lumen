@@ -12,45 +12,45 @@ use crate::types::IntInfo;
 // Gate deciding whether a function may take the MIR fast path. Anything not
 // provably numeric-scalar here falls back to the interpreter, so this must only
 // admit shapes the lowerer can actually handle.
-fn all_numeric_sig(f: &FnDef) -> bool {
+fn all_numsig(f: &FnDef) -> bool {
     let is_num = |t: &Type| matches!(t, Type::Named(n) if n == "i64" || n == "f64");
     !f.is_method && f.params.iter().all(|p| is_num(&p.ty)) && is_num(&f.ret)
 }
 
 pub fn mir_eligible(f: &FnDef, info: &IntInfo) -> bool {
     let _ = info;
-    if !all_numeric_sig(f) {
+    if !all_numsig(f) {
         return false;
     }
-    f.body.iter().all(stmt_mir_ok)
+    f.body.iter().all(stmt_ok)
 }
 
-fn stmt_mir_ok(s: &Stmt) -> bool {
+fn stmt_ok(s: &Stmt) -> bool {
     match s {
-        Stmt::Let { value, .. } => expr_mir_ok(value),
-        Stmt::Assign { target, value } => matches!(target, Expr::Ident(_)) && expr_mir_ok(value),
-        Stmt::ExprStmt(e) => expr_mir_ok(e),
-        Stmt::Return(opt) => opt.as_ref().map(expr_mir_ok).unwrap_or(true),
+        Stmt::Let { value, .. } => expr_ok(value),
+        Stmt::Assign { target, value } => matches!(target, Expr::Ident(_)) && expr_ok(value),
+        Stmt::ExprStmt(e) => expr_ok(e),
+        Stmt::Return(opt) => opt.as_ref().map(expr_ok).unwrap_or(true),
         Stmt::If {
             cond,
             then,
             elifs,
             els,
         } => {
-            expr_mir_ok(cond)
-                && then.iter().all(stmt_mir_ok)
+            expr_ok(cond)
+                && then.iter().all(stmt_ok)
                 && elifs
                     .iter()
-                    .all(|(c, b)| expr_mir_ok(c) && b.iter().all(stmt_mir_ok))
+                    .all(|(c, b)| expr_ok(c) && b.iter().all(stmt_ok))
                 && els
                     .as_ref()
-                    .map(|b| b.iter().all(stmt_mir_ok))
+                    .map(|b| b.iter().all(stmt_ok))
                     .unwrap_or(true)
         }
-        Stmt::While { cond, body } => expr_mir_ok(cond) && body.iter().all(stmt_mir_ok),
+        Stmt::While { cond, body } => expr_ok(cond) && body.iter().all(stmt_ok),
 
         Stmt::For { iter, body, .. } => {
-            matches!(iter, Expr::Range { .. }) && body.iter().all(stmt_mir_ok)
+            matches!(iter, Expr::Range { .. }) && body.iter().all(stmt_ok)
         }
 
         Stmt::Try { .. } | Stmt::Raise(_) => false,
@@ -58,18 +58,18 @@ fn stmt_mir_ok(s: &Stmt) -> bool {
     }
 }
 
-fn expr_mir_ok(e: &Expr) -> bool {
+fn expr_ok(e: &Expr) -> bool {
     match e {
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Ident(_) => true,
-        Expr::Unary { expr, .. } => expr_mir_ok(expr),
-        Expr::Binary { lhs, rhs, .. } => expr_mir_ok(lhs) && expr_mir_ok(rhs),
+        Expr::Unary { expr, .. } => expr_ok(expr),
+        Expr::Binary { lhs, rhs, .. } => expr_ok(lhs) && expr_ok(rhs),
 
         Expr::Call { callee, args } => {
-            matches!(&**callee, Expr::Ident(_)) && args.iter().all(expr_mir_ok)
+            matches!(&**callee, Expr::Ident(_)) && args.iter().all(expr_ok)
         }
-        Expr::Range { lo, hi } => expr_mir_ok(lo) && expr_mir_ok(hi),
+        Expr::Range { lo, hi } => expr_ok(lo) && expr_ok(hi),
         Expr::IfElse { cond, then, els } => {
-            expr_mir_ok(cond) && expr_mir_ok(then) && expr_mir_ok(els)
+            expr_ok(cond) && expr_ok(then) && expr_ok(els)
         }
 
         _ => false,
@@ -469,13 +469,13 @@ impl<'a> Lowerer<'a> {
         {
             return v;
         }
-        self.read_var_recursive(name, block)
+        self.read_rec(name, block)
     }
 
     // SSA name lookup that crosses block boundaries (Braun et al.). For an
     // unsealed block we cannot yet know all predecessors, so we park an
     // incomplete phi and fill its operands when the block is sealed.
-    fn read_var_recursive(&mut self, name: &str, block: BlockId) -> Val {
+    fn read_rec(&mut self, name: &str, block: BlockId) -> Val {
         let val = if !self.sealed.contains(&block) {
             let phi = self.fresh_phi(block);
             self.incomplete_phis
@@ -500,8 +500,8 @@ impl<'a> Lowerer<'a> {
 
                 let phi = self.fresh_phi(block);
                 self.write_var(name, block, Val::Vreg(phi));
-                self.add_phi_operands(name, block, phi);
-                self.try_remove_phi(block, phi)
+                self.add_phis(name, block, phi);
+                self.drop_phi(block, phi)
             }
         };
         self.write_var(name, block, val);
@@ -525,17 +525,17 @@ impl<'a> Lowerer<'a> {
         dst
     }
 
-    fn add_phi_operands(&mut self, name: &str, block: BlockId, phi: Vreg) {
+    fn add_phis(&mut self, name: &str, block: BlockId, phi: Vreg) {
         let preds = self.preds.get(&block).cloned().unwrap_or_default();
         let mut srcs = Vec::with_capacity(preds.len());
         for p in &preds {
             let pv = self.read_var(name, *p);
             srcs.push((*p, pv));
         }
-        self.set_phi_srcs(block, phi, srcs);
+        self.set_phis(block, phi, srcs);
     }
 
-    fn set_phi_srcs(&mut self, block: BlockId, phi: Vreg, srcs: Vec<(BlockId, Val)>) {
+    fn set_phis(&mut self, block: BlockId, phi: Vreg, srcs: Vec<(BlockId, Val)>) {
         for i in &mut self.f.block_mut(block).insts {
             if let Inst::Phi { dst, srcs: s } = i {
                 if *dst == phi {
@@ -560,7 +560,7 @@ impl<'a> Lowerer<'a> {
     // Trivial-phi elimination: if a phi's only distinct operand (ignoring self
     // references) is a single value, the phi is redundant. Replace it everywhere
     // so SSA stays minimal and downstream uses see the real def.
-    fn try_remove_phi(&mut self, block: BlockId, phi: Vreg) -> Val {
+    fn drop_phi(&mut self, block: BlockId, phi: Vreg) -> Val {
         let srcs = self.phi_srcs(block, phi);
         let mut same: Option<Val> = None;
         for (_, v) in &srcs {
@@ -582,11 +582,11 @@ impl<'a> Lowerer<'a> {
             .block_mut(block)
             .insts
             .retain(|i| !matches!(i, Inst::Phi { dst, .. } if *dst == phi));
-        self.replace_all_uses(Val::Vreg(phi), replacement);
+        self.replace_uses(Val::Vreg(phi), replacement);
         replacement
     }
 
-    fn replace_all_uses(&mut self, old: Val, new: Val) {
+    fn replace_uses(&mut self, old: Val, new: Val) {
         for b in &mut self.f.blocks {
             for i in &mut b.insts {
                 match i {
@@ -653,9 +653,9 @@ impl<'a> Lowerer<'a> {
         }
         if let Some(phis) = self.incomplete_phis.remove(&block) {
             for (name, phi) in phis {
-                self.add_phi_operands(&name, block, phi);
+                self.add_phis(&name, block, phi);
 
-                let v = self.try_remove_phi(block, phi);
+                let v = self.drop_phi(block, phi);
                 if v != Val::Vreg(phi) {
                     self.write_var(&name, block, v);
                 }
@@ -837,7 +837,7 @@ impl<'a> Lowerer<'a> {
     fn lower_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Val {
 
         if matches!(op, BinOp::And | BinOp::Or) {
-            return self.lower_short_circuit(op, lhs, rhs);
+            return self.lower_shortcct(op, lhs, rhs);
         }
         let float = self.expr_dom(lhs).is_float() || self.expr_dom(rhs).is_float();
         let a = self.lower_expr(lhs);
@@ -896,7 +896,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    fn lower_short_circuit(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Val {
+    fn lower_shortcct(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Val {
         let rhs_b = self.f.new_block();
         let join_b = self.f.new_block();
         let cur = self.cur.expect("sc in terminated block");
@@ -1025,10 +1025,10 @@ impl<'a> Lowerer<'a> {
                 els,
             } => self.lower_if(cond, then, elifs, els),
             Stmt::While { cond, body } => self.lower_while(cond, body),
-            Stmt::For { var, iter, body } => self.lower_for_range(var, iter, body),
+            Stmt::For { var, iter, body } => self.lower_range(var, iter, body),
 
             Stmt::Try { .. } | Stmt::Raise(_) => {
-                unreachable!("try/raise are not MIR-eligible (see stmt_mir_ok)")
+                unreachable!("try/raise are not MIR-eligible (see stmt_ok)")
             }
         }
     }
@@ -1126,7 +1126,7 @@ impl<'a> Lowerer<'a> {
         self.cur = Some(exit_b);
     }
 
-    fn lower_for_range(&mut self, var: &str, iter: &Expr, body: &[Stmt]) {
+    fn lower_range(&mut self, var: &str, iter: &Expr, body: &[Stmt]) {
         let (lo, hi) = match iter {
             Expr::Range { lo, hi } => (lo, hi),
             _ => unreachable!("gate admits only for-range"),

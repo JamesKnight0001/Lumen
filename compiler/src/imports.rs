@@ -8,7 +8,7 @@ use crate::ast::{Expr, FStrPart, Item, Program, Stmt};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-fn module_to_path(base_dir: &Path, root: &Path, module: &str, level: u8) -> (PathBuf, String) {
+fn mod_path(base_dir: &Path, root: &Path, module: &str, level: u8) -> (PathBuf, String) {
     let segs: Vec<&str> = module.split('.').filter(|s| !s.is_empty()).collect();
     let access = segs.last().copied().unwrap_or(module).to_string();
 
@@ -51,7 +51,7 @@ fn module_to_path(base_dir: &Path, root: &Path, module: &str, level: u8) -> (Pat
     // Else search package dirs (installed via `lumen install`): the active venv
     // (LUMEN_VENV) then a project-local lumen_modules/. Lets installed packages
     // resolve by bare name without changing the sibling-import behavior above.
-    for r in module_search_roots() {
+    for r in search_roots() {
         let p = candidate(&r);
         if p.exists() {
             return (p, access);
@@ -65,7 +65,7 @@ fn module_to_path(base_dir: &Path, root: &Path, module: &str, level: u8) -> (Pat
 
 // Package search roots, highest precedence first: active venv, then a
 // project-local lumen_modules/. Mirrors pkg::modules_dir but lists all roots.
-fn module_search_roots() -> Vec<PathBuf> {
+fn search_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Ok(v) = std::env::var("LUMEN_VENV") {
         if !v.is_empty() {
@@ -92,7 +92,7 @@ pub fn collect(
         if imp.level == 0 && is_builtin(module) {
             continue;
         }
-        let (path, access) = module_to_path(base_dir, root, module, imp.level);
+        let (path, access) = mod_path(base_dir, root, module, imp.level);
 
         let access_name = imp.alias.clone().unwrap_or(access);
         aliases.insert(access_name, module.clone());

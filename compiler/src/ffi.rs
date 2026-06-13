@@ -121,7 +121,7 @@ extern "system" {
 
 // Safe-ish wrapper over the COM trampoline. Used for vtable calls where the
 // first argument is the object pointer (`this`) and fnptr is resolved from the
-// object's vtable by the caller (see builtins::com_vcall_impl).
+// object's vtable by the caller (see builtins::com_vcall).
 #[allow(clippy::missing_safety_doc)]
 pub unsafe fn com_trampoline(
     fnptr: *const core::ffi::c_void,
@@ -145,7 +145,7 @@ extern "system" {
 // Marshal one Lumen Value into a raw 64-bit word. Floats are passed as their
 // IEEE bit pattern (the trampoline copies it into XMM too). Strings are pinned
 // as CStrings in `pin` so their pointers stay valid until after the call.
-fn val_to_word(v: &Value, want_float: bool, pin: &mut Vec<CString>) -> Result<i64, String> {
+fn val_word(v: &Value, want_float: bool, pin: &mut Vec<CString>) -> Result<i64, String> {
     if want_float {
         let d = match v {
             Value::Float(x) => *x,
@@ -172,11 +172,11 @@ fn val_to_word(v: &Value, want_float: bool, pin: &mut Vec<CString>) -> Result<i6
     })
 }
 
-fn is_float_ty(t: &Type) -> bool {
+fn is_fty(t: &Type) -> bool {
     matches!(t, Type::Named(n) if n == "f64" || n == "f32")
 }
 
-pub fn call_dll_fn(spec: &(String, ExternFn), args: &[Value]) -> Result<Value, String> {
+pub fn call_dll(spec: &(String, ExternFn), args: &[Value]) -> Result<Value, String> {
     let (lib, ef) = spec;
     if args.len() > 4 {
 
@@ -204,9 +204,9 @@ pub fn call_dll_fn(spec: &(String, ExternFn), args: &[Value]) -> Result<Value, S
             let want_float = ef
                 .params
                 .get(i)
-                .map(|p| is_float_ty(&p.ty))
+                .map(|p| is_fty(&p.ty))
                 .unwrap_or(false);
-            words[i] = val_to_word(v, want_float, &mut pin)?;
+            words[i] = val_word(v, want_float, &mut pin)?;
         }
 
         let mut out_xmm: i64 = 0;

@@ -280,15 +280,15 @@ impl LlvmGen {
             func: f.name.clone(),
             loops: Vec::new(),
             self_slot: None,
-            has_try: body_has_try(&f.body),
+            has_try: has_trybody(&f.body),
             arena_now: false,
             // arena only if this fn has at least one eligible local AND no try
             // (an exception unwinds past our ret-time reset; v1 plays safe).
-            fn_has_arena: !body_has_try(&f.body)
+            fn_has_arena: !has_trybody(&f.body)
                 && self.arena.iter().any(|(fname, _)| fname == &f.name),
             // Raw-int slots: proven-int locals held unboxed. Off for try-functions
             // (setjmp/volatile-slot hazard) and when LUMEN_NO_RAWSLOT is set.
-            raw_slots: if body_has_try(&f.body) || std::env::var("LUMEN_NO_RAWSLOT").is_ok() {
+            raw_slots: if has_trybody(&f.body) || std::env::var("LUMEN_NO_RAWSLOT").is_ok() {
                 std::collections::HashSet::new()
             } else {
                 self.info.int_vars.get(&f.name).cloned().unwrap_or_default()
@@ -366,7 +366,7 @@ impl LlvmGen {
         // setjmp. We apply it to every slot load/store in functions that contain
         // a try - this blocks mem2reg from promoting them into clobbered regs.
         // Functions with no try are untouched, so they keep full -O2 speed.
-        if body_has_try(&f.body) {
+        if has_trybody(&f.body) {
             rest = rest
                 .replace("  store i64 ", "  store volatile i64 ")
                 .replace(" = load i64, ptr ", " = load volatile i64, ptr ");
@@ -527,9 +527,9 @@ impl LlvmGen {
             }
             Stmt::For { var, iter, body } => {
                 if let Expr::Range { lo, hi } = iter {
-                    self.gen_for_range(var, lo, hi, body, ctx, out)?;
+                    self.gen_range(var, lo, hi, body, ctx, out)?;
                 } else {
-                    self.gen_for_list(var, iter, body, ctx, out)?;
+                    self.gen_forlist(var, iter, body, ctx, out)?;
                 }
             }
             Stmt::Break => {
@@ -639,7 +639,7 @@ impl LlvmGen {
         Ok(())
     }
 
-    fn gen_for_range(
+    fn gen_range(
         &mut self,
         var: &str,
         lo: &Expr,
@@ -726,7 +726,7 @@ impl LlvmGen {
         Ok(())
     }
 
-    fn gen_for_list(
+    fn gen_forlist(
         &mut self,
         var: &str,
         iter: &Expr,
@@ -1200,7 +1200,7 @@ impl LlvmGen {
             }
             Expr::Range { lo, hi } => {
                 // range as a value -> build a list [lo, lo+1, .., hi-1]
-                self.gen_range_list(lo, hi, ctx, out)
+                self.gen_rangelist(lo, hi, ctx, out)
             }
             Expr::Field { obj, name } => {
                 self.need("lumen_struct_get", "i64 @lumen_struct_get(i64, ptr)");
@@ -1216,7 +1216,7 @@ impl LlvmGen {
             Expr::Method { obj, name, args } => self.gen_method(obj, name, args, ctx, out),
             Expr::Closure { fn_name, captures } => self.gen_closure(fn_name, captures, ctx, out),
             Expr::Lambda { .. } => Err("internal: lambda should be lifted before codegen".into()),
-            Expr::NamedCall { callee, args } => self.gen_named_call(callee, args, ctx, out),
+            Expr::NamedCall { callee, args } => self.gen_ncall(callee, args, ctx, out),
             Expr::ListComp {
                 elem,
                 var,
@@ -1389,7 +1389,7 @@ impl LlvmGen {
     fn known_int(&self, e: &Expr, ctx: &Ctx) -> bool {
         match e {
             Expr::Int(_) => true,
-            Expr::Ident(n) => self.info.is_int_var(&ctx.func, n),
+            Expr::Ident(n) => self.info.is_ivar(&ctx.func, n),
             Expr::Unary { op: UnOp::Neg, expr } => self.known_int(expr, ctx),
             Expr::Binary { op, lhs, rhs } => {
                 // Div/Mod only when the divisor is a nonzero int literal: then
@@ -1535,7 +1535,7 @@ impl LlvmGen {
     fn known_float(&self, e: &Expr, ctx: &Ctx) -> bool {
         match e {
             Expr::Float(_) => true,
-            Expr::Ident(n) => self.info.is_float_var(&ctx.func, n),
+            Expr::Ident(n) => self.info.is_fvar(&ctx.func, n),
             Expr::Unary { op: UnOp::Neg, expr } => self.known_float(expr, ctx),
             Expr::Binary { op, lhs, rhs } => {
                 matches!(
@@ -1685,7 +1685,7 @@ impl LlvmGen {
         Ok(r)
     }
 
-    fn gen_range_list(
+    fn gen_rangelist(
         &mut self,
         lo: &Expr,
         hi: &Expr,
@@ -1817,9 +1817,9 @@ impl LlvmGen {
             }
             "range" => {
                 if args.len() == 1 {
-                    return self.gen_range_list(&Expr::Int(0), &args[0], ctx, out);
+                    return self.gen_rangelist(&Expr::Int(0), &args[0], ctx, out);
                 } else if args.len() == 2 {
-                    return self.gen_range_list(&args[0], &args[1], ctx, out);
+                    return self.gen_rangelist(&args[0], &args[1], ctx, out);
                 }
                 return Err("range() takes 1 or 2 args".into());
             }
@@ -1882,7 +1882,7 @@ impl LlvmGen {
 
         // struct constructor
         if self.structs.contains_key(&name) {
-            return self.gen_struct_ctor(&name, args, ctx, out);
+            return self.gen_struct(&name, args, ctx, out);
         }
         // FFI extern
         if let Some(ef) = self.externs.get(&name).cloned() {
@@ -2058,8 +2058,8 @@ impl LlvmGen {
 
     // Named-argument call: only valid for struct construction (Point(x=3,y=4)).
     // Reorder the named args into the struct's field order, then build it via the
-    // positional ctor. Mirrors the asm backend's gen_named_call + gen_struct_ctor.
-    fn gen_named_call(
+    // positional ctor. Mirrors the asm backend's gen_ncall + gen_struct.
+    fn gen_ncall(
         &mut self,
         callee: &Expr,
         args: &[(String, Expr)],
@@ -2085,10 +2085,10 @@ impl LlvmGen {
                 .ok_or(format!("missing field '{}' for struct '{name}'", fld.name))?;
             ordered.push(val);
         }
-        self.gen_struct_ctor(&name, &ordered, ctx, out)
+        self.gen_struct(&name, &ordered, ctx, out)
     }
 
-    fn gen_struct_ctor(
+    fn gen_struct(
         &mut self,
         name: &str,
         args: &[Expr],
@@ -2113,7 +2113,7 @@ impl LlvmGen {
         // return (crashes at -O0). So emit a module-level global array of name
         // constants, exactly like the asm backend's .rodata field tables.
         let names: Vec<String> = sdef.fields.iter().map(|f| f.name.clone()).collect();
-        let arr = self.field_names_global(name, &names);
+        let arr = self.field_globals(name, &names);
         let nm = self.add_str(name);
         let np = self.vreg();
         let _ = writeln!(out, "  {np} = {nm}");
@@ -2149,7 +2149,7 @@ impl LlvmGen {
     // to each field-name C-string constant. Returns the global symbol, usable
     // directly as a `ptr` arg. Lives for the whole program, so lumen_struct_new
     // can keep the pointer.
-    fn field_names_global(&mut self, sname: &str, names: &[String]) -> String {
+    fn field_globals(&mut self, sname: &str, names: &[String]) -> String {
         let gsym = format!("@.fields.{}", sanitize(sname));
         if self.declared.insert(gsym.clone()) {
             // each name needs a private string constant
@@ -2237,21 +2237,21 @@ impl LlvmGen {
 // short helpers (module-level)
 
 // Does this statement list contain a try anywhere (including nested)?
-fn body_has_try(body: &[Stmt]) -> bool {
-    body.iter().any(stmt_has_try)
+fn has_trybody(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_try)
 }
 
-fn stmt_has_try(s: &Stmt) -> bool {
+fn stmt_try(s: &Stmt) -> bool {
     match s {
         Stmt::Try { .. } => true,
         Stmt::If {
             then, elifs, els, ..
         } => {
-            body_has_try(then)
-                || elifs.iter().any(|(_, b)| body_has_try(b))
-                || els.as_ref().is_some_and(|b| body_has_try(b))
+            has_trybody(then)
+                || elifs.iter().any(|(_, b)| has_trybody(b))
+                || els.as_ref().is_some_and(|b| has_trybody(b))
         }
-        Stmt::While { body, .. } | Stmt::For { body, .. } => body_has_try(body),
+        Stmt::While { body, .. } | Stmt::For { body, .. } => has_trybody(body),
         _ => false,
     }
 }

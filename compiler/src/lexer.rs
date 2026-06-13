@@ -248,7 +248,7 @@ impl<'a> Lexer<'a> {
                 self.bump();
             } else if c == b'#' {
                 if self.peek2() == b'[' {
-                    self.skip_block_comment();
+                    self.skip_block();
                 } else {
                     while self.pos < self.src.len() && self.peek() != b'\n' {
                         self.bump();
@@ -433,7 +433,7 @@ impl<'a> Lexer<'a> {
 
     // Skip a `#[ ... ]#` block comment, delimiters included, across any number
     // of lines. Cursor must be on the opening `#`; unterminated runs to EOF.
-    fn skip_block_comment(&mut self) {
+    fn skip_block(&mut self) {
         self.bump(); // #
         self.bump(); // [
         while self.pos < self.src.len() {
@@ -468,7 +468,7 @@ impl<'a> Lexer<'a> {
         // A block comment can span lines, so `#[` consumes through its `]#` even
         // across newlines, unlike a `#` line comment.
         if c == b'#' && self.peek2() == b'[' {
-            self.skip_block_comment();
+            self.skip_block();
             // Skip trailing space; if the line is now empty it carries no layout,
             // otherwise emit indent and let the caller tokenize the rest.
             while self.peek() == b' ' || self.peek() == b'\t' || self.peek() == b'\r' {

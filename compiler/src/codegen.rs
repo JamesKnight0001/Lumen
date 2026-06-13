@@ -58,7 +58,7 @@ struct FnCtx {
 
 // Caller-clobbered we cannot keep, so these are the callee-saved regs/xmm we
 // borrow to keep hot loop accumulators out of memory. We save/restore them in
-// the prologue/epilogue (see gen_fn_impl).
+// the prologue/epilogue (see gen_impl).
 const XMM_POOL: [&str; 4] = ["xmm6", "xmm7", "xmm8", "xmm9"];
 
 const CALLEE_POOL: [&str; 4] = ["r12", "r13", "r14", "r15"];
@@ -69,7 +69,7 @@ impl FnCtx {
         self.raw_int.contains(name)
     }
 
-    fn is_raw_float(&self, name: &str) -> bool {
+    fn raw_fval(&self, name: &str) -> bool {
         self.raw_float.contains(name)
     }
 }
@@ -109,7 +109,7 @@ impl Codegen {
     // Cooperative GC safepoint: if the runtime has allocated enough since the
     // last collection, call into the collector here. We only poll at points
     // where the stack is in a scannable state (live values spilled to slots).
-    fn emit_gc_poll(&mut self, out: &mut String) {
+    fn emit_poll(&mut self, out: &mut String) {
         let skip = self.new_label("gcskip");
         out.push_str("    cmp qword ptr [rip + lumen_allocs_since_gc], 512\n");
         let _ = writeln!(out, "    jl {skip}");
@@ -117,9 +117,9 @@ impl Codegen {
         let _ = writeln!(out, "{skip}:");
     }
 
-    fn emit_gc_poll_cond(&mut self, body: &[Stmt], out: &mut String) {
-        if !Self::body_no_alloc(body) {
-            self.emit_gc_poll(out);
+    fn poll_cond(&mut self, body: &[Stmt], out: &mut String) {
+        if !Self::body_noalloc(body) {
+            self.emit_poll(out);
         }
     }
 
@@ -135,14 +135,14 @@ impl Codegen {
 
     // Ints live in the low 48 bits of a NaN-boxed word. Sign-extend them back to
     // a full 64-bit value by shifting up 16 and arithmetic-shifting down.
-    fn emit_unbox_int(out: &mut String) {
+    fn emit_unbox(out: &mut String) {
 
         out.push_str("    shl rax, 16\n    sar rax, 16\n");
     }
 
     // Re-box a raw 64-bit int: keep the low 48 bits, then OR in the int tag in
     // the high 16. The mask drops any garbage in bits 48-63 first.
-    fn emit_box_int(out: &mut String) {
+    fn emit_box(out: &mut String) {
         out.push_str("    mov rcx, 0xFFFFFFFFFFFF\n    and rax, rcx\n");
         out.push_str("    mov rcx, 0x7FF9000000000000\n    or rax, rcx\n");
     }
@@ -255,7 +255,7 @@ impl Codegen {
                     && self.int_info.int_ret.contains(&f.name)
                     && f.params
                         .iter()
-                        .all(|p| self.int_info.is_int_var(&f.name, &p.name))
+                        .all(|p| self.int_info.is_ivar(&f.name, &p.name))
             })
             .map(|f| f.name.clone())
             .collect();
@@ -265,7 +265,7 @@ impl Codegen {
             out.push('\n');
 
             if self.raw_entry_fns.contains(&f.name) {
-                let raw = self.gen_fn_raw(&Self::fnsym_raw(&f.name), f)?;
+                let raw = self.gen_raw(&Self::fnsym_raw(&f.name), f)?;
                 out.push_str(&raw);
                 out.push('\n');
             }
@@ -308,88 +308,88 @@ impl Codegen {
         f: &FnDef,
         struct_hint: Option<String>,
     ) -> Result<String, String> {
-        self.gen_fn_impl(sym, f, struct_hint, false)
+        self.gen_impl(sym, f, struct_hint, false)
     }
 
-    fn ident_used_in_body(name: &str, body: &[Stmt]) -> bool {
-        body.iter().any(|s| Self::ident_used_in_stmt(name, s))
+    fn used_body(name: &str, body: &[Stmt]) -> bool {
+        body.iter().any(|s| Self::used_stmt(name, s))
     }
 
-    fn assigned_in_body(name: &str, body: &[Stmt]) -> bool {
-        body.iter().any(|s| Self::assigned_in_stmt(name, s))
+    fn body_assigns(name: &str, body: &[Stmt]) -> bool {
+        body.iter().any(|s| Self::is_assigned(name, s))
     }
 
-    fn assigned_in_stmt(name: &str, s: &Stmt) -> bool {
+    fn is_assigned(name: &str, s: &Stmt) -> bool {
         match s {
             Stmt::Assign { target, .. } => matches!(target, Expr::Ident(n) if n == name),
             Stmt::Let { name: n, .. } => n == name,
             Stmt::If {
                 then, elifs, els, ..
             } => {
-                then.iter().any(|s| Self::assigned_in_stmt(name, s))
+                then.iter().any(|s| Self::is_assigned(name, s))
                     || elifs
                         .iter()
-                        .any(|(_, b)| b.iter().any(|s| Self::assigned_in_stmt(name, s)))
+                        .any(|(_, b)| b.iter().any(|s| Self::is_assigned(name, s)))
                     || els
                         .as_ref()
-                        .is_some_and(|b| b.iter().any(|s| Self::assigned_in_stmt(name, s)))
+                        .is_some_and(|b| b.iter().any(|s| Self::is_assigned(name, s)))
             }
-            Stmt::While { body, .. } => body.iter().any(|s| Self::assigned_in_stmt(name, s)),
+            Stmt::While { body, .. } => body.iter().any(|s| Self::is_assigned(name, s)),
 
             Stmt::For { var, body, .. } => {
-                var == name || body.iter().any(|s| Self::assigned_in_stmt(name, s))
+                var == name || body.iter().any(|s| Self::is_assigned(name, s))
             }
             _ => false,
         }
     }
 
-    fn ident_used_in_stmt(name: &str, s: &Stmt) -> bool {
+    fn used_stmt(name: &str, s: &Stmt) -> bool {
         match s {
-            Stmt::Let { value, .. } => Self::ident_used_in_expr(name, value),
+            Stmt::Let { value, .. } => Self::used_expr(name, value),
             Stmt::Assign { target, value } => {
-                Self::ident_used_in_expr(name, target) || Self::ident_used_in_expr(name, value)
+                Self::used_expr(name, target) || Self::used_expr(name, value)
             }
-            Stmt::ExprStmt(e) => Self::ident_used_in_expr(name, e),
+            Stmt::ExprStmt(e) => Self::used_expr(name, e),
             Stmt::Return(opt) => opt
                 .as_ref()
-                .is_some_and(|e| Self::ident_used_in_expr(name, e)),
+                .is_some_and(|e| Self::used_expr(name, e)),
             Stmt::If {
                 cond,
                 then,
                 elifs,
                 els,
             } => {
-                Self::ident_used_in_expr(name, cond)
-                    || then.iter().any(|s| Self::ident_used_in_stmt(name, s))
+                Self::used_expr(name, cond)
+                    || then.iter().any(|s| Self::used_stmt(name, s))
                     || elifs.iter().any(|(c, b)| {
-                        Self::ident_used_in_expr(name, c)
-                            || b.iter().any(|s| Self::ident_used_in_stmt(name, s))
+                        Self::used_expr(name, c)
+                            || b.iter().any(|s| Self::used_stmt(name, s))
                     })
                     || els
                         .as_ref()
-                        .is_some_and(|b| b.iter().any(|s| Self::ident_used_in_stmt(name, s)))
+                        .is_some_and(|b| b.iter().any(|s| Self::used_stmt(name, s)))
             }
             Stmt::While { cond, body } => {
-                Self::ident_used_in_expr(name, cond)
-                    || body.iter().any(|s| Self::ident_used_in_stmt(name, s))
+                Self::used_expr(name, cond)
+                    || body.iter().any(|s| Self::used_stmt(name, s))
             }
             Stmt::For { iter, body, .. } => {
 
-                Self::ident_used_in_expr(name, iter)
-                    || body.iter().any(|s| Self::ident_used_in_stmt(name, s))
+                Self::used_expr(name, iter)
+                    || body.iter().any(|s| Self::used_stmt(name, s))
             }
             Stmt::Try {
                 body, catch_body, ..
             } => {
-                body.iter().any(|s| Self::ident_used_in_stmt(name, s))
-                    || catch_body.iter().any(|s| Self::ident_used_in_stmt(name, s))
+                body.iter().any(|s| Self::used_stmt(name, s))
+                    || catch_body.iter().any(|s| Self::used_stmt(name, s))
             }
-            Stmt::Raise(e) => Self::ident_used_in_expr(name, e),
+            Stmt::Raise(e) => Self::used_expr(name, e),
             Stmt::Break | Stmt::Continue | Stmt::SrcLine(_) => false,
         }
     }
 
-    fn ident_used_in_expr(name: &str, e: &Expr) -> bool {
+    fn used_expr(name: &str, e: &Expr) -> bool {
         match e {
             Expr::Ident(n) => n == name,
             Expr::Int(_)
@@ -398,113 +398,113 @@ impl Codegen {
             | Expr::Bool(_)
             | Expr::Nil
             | Expr::SelfExpr => false,
-            Expr::Unary { expr, .. } => Self::ident_used_in_expr(name, expr),
+            Expr::Unary { expr, .. } => Self::used_expr(name, expr),
             Expr::Binary { lhs, rhs, .. } => {
-                Self::ident_used_in_expr(name, lhs) || Self::ident_used_in_expr(name, rhs)
+                Self::used_expr(name, lhs) || Self::used_expr(name, rhs)
             }
             Expr::Call { callee, args } => {
-                Self::ident_used_in_expr(name, callee)
-                    || args.iter().any(|a| Self::ident_used_in_expr(name, a))
+                Self::used_expr(name, callee)
+                    || args.iter().any(|a| Self::used_expr(name, a))
             }
             Expr::NamedCall { callee, args } => {
-                Self::ident_used_in_expr(name, callee)
-                    || args.iter().any(|(_, a)| Self::ident_used_in_expr(name, a))
+                Self::used_expr(name, callee)
+                    || args.iter().any(|(_, a)| Self::used_expr(name, a))
             }
-            Expr::Field { obj, .. } => Self::ident_used_in_expr(name, obj),
+            Expr::Field { obj, .. } => Self::used_expr(name, obj),
             Expr::Method { obj, args, .. } => {
-                Self::ident_used_in_expr(name, obj)
-                    || args.iter().any(|a| Self::ident_used_in_expr(name, a))
+                Self::used_expr(name, obj)
+                    || args.iter().any(|a| Self::used_expr(name, a))
             }
-            Expr::List(xs) => xs.iter().any(|x| Self::ident_used_in_expr(name, x)),
+            Expr::List(xs) => xs.iter().any(|x| Self::used_expr(name, x)),
             Expr::Map(kvs) => kvs.iter().any(|(k, v)| {
-                Self::ident_used_in_expr(name, k) || Self::ident_used_in_expr(name, v)
+                Self::used_expr(name, k) || Self::used_expr(name, v)
             }),
             Expr::Range { lo, hi } => {
-                Self::ident_used_in_expr(name, lo) || Self::ident_used_in_expr(name, hi)
+                Self::used_expr(name, lo) || Self::used_expr(name, hi)
             }
             Expr::IfElse { cond, then, els } => {
-                Self::ident_used_in_expr(name, cond)
-                    || Self::ident_used_in_expr(name, then)
-                    || Self::ident_used_in_expr(name, els)
+                Self::used_expr(name, cond)
+                    || Self::used_expr(name, then)
+                    || Self::used_expr(name, els)
             }
             Expr::ListComp {
                 elem, iter, cond, ..
             } => {
-                Self::ident_used_in_expr(name, elem)
-                    || Self::ident_used_in_expr(name, iter)
+                Self::used_expr(name, elem)
+                    || Self::used_expr(name, iter)
                     || cond
                         .as_ref()
-                        .is_some_and(|c| Self::ident_used_in_expr(name, c))
+                        .is_some_and(|c| Self::used_expr(name, c))
             }
             Expr::Index { obj, index } => {
-                Self::ident_used_in_expr(name, obj) || Self::ident_used_in_expr(name, index)
+                Self::used_expr(name, obj) || Self::used_expr(name, index)
             }
             Expr::Slice { obj, lo, hi } => {
-                Self::ident_used_in_expr(name, obj)
+                Self::used_expr(name, obj)
                     || lo
                         .as_ref()
-                        .is_some_and(|e| Self::ident_used_in_expr(name, e))
+                        .is_some_and(|e| Self::used_expr(name, e))
                     || hi
                         .as_ref()
-                        .is_some_and(|e| Self::ident_used_in_expr(name, e))
+                        .is_some_and(|e| Self::used_expr(name, e))
             }
             Expr::FStr(parts) => parts.iter().any(|p| match p {
-                FStrPart::Expr(pe) => Self::ident_used_in_expr(name, pe),
+                FStrPart::Expr(pe) => Self::used_expr(name, pe),
                 _ => false,
             }),
 
-            Expr::Lambda { body, .. } => body.iter().any(|s| Self::ident_used_in_stmt(name, s)),
+            Expr::Lambda { body, .. } => body.iter().any(|s| Self::used_stmt(name, s)),
             Expr::Closure { captures, .. } => {
-                captures.iter().any(|c| Self::ident_used_in_expr(name, c))
+                captures.iter().any(|c| Self::used_expr(name, c))
             }
         }
     }
 
-    fn float_accum_safe(var: &str, body: &[Stmt]) -> bool {
+    fn faccum_safe(var: &str, body: &[Stmt]) -> bool {
         body.iter().all(|s| match s {
 
             Stmt::Assign {
                 target: Expr::Ident(t),
                 value,
-            } if t == var => Self::float_rhs_safe(var, value),
+            } if t == var => Self::frhs_safe(var, value),
 
-            _ => !Self::ident_used_in_stmt(var, s),
+            _ => !Self::used_stmt(var, s),
         })
     }
 
     // An int var is a safe register accumulator across a loop body when every use
     // is either (a) an assignment `var = <expr>` whose rhs reads var only as a
     // plain value (no escape), or (b) a read in a non-assigning statement that
-    // doesn't let it escape into an alias. Mirrors float_accum_safe. The var must
+    // doesn't let it escape into an alias. Mirrors faccum_safe. The var must
     // also be a known raw-int so its slot holds an unboxed i64.
-    fn int_accum_safe(var: &str, body: &[Stmt]) -> bool {
+    fn iaccum_safe(var: &str, body: &[Stmt]) -> bool {
         body.iter().all(|s| match s {
             Stmt::Assign {
                 target: Expr::Ident(t),
                 value,
-            } if t == var => Self::int_rhs_safe(var, value),
-            _ => !Self::ident_used_in_stmt(var, s),
+            } if t == var => Self::irhs_safe(var, value),
+            _ => !Self::used_stmt(var, s),
         })
     }
 
-    fn int_rhs_safe(var: &str, e: &Expr) -> bool {
+    fn irhs_safe(var: &str, e: &Expr) -> bool {
         match e {
             Expr::Ident(_) => true,
             Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Nil => true,
-            Expr::Unary { expr, .. } => Self::int_rhs_safe(var, expr),
+            Expr::Unary { expr, .. } => Self::irhs_safe(var, expr),
             Expr::Binary { lhs, rhs, .. } => {
-                Self::int_rhs_safe(var, lhs) && Self::int_rhs_safe(var, rhs)
+                Self::irhs_safe(var, lhs) && Self::irhs_safe(var, rhs)
             }
             Expr::Index { obj, index } => {
                 // Reading an element is fine; the var must not appear inside the
                 // receiver/index in a way that aliases it (it can be the index value).
-                Self::int_rhs_safe(var, obj) && Self::int_rhs_safe(var, index)
+                Self::irhs_safe(var, obj) && Self::irhs_safe(var, index)
             }
-            other => !Self::ident_used_in_expr(var, other),
+            other => !Self::used_expr(var, other),
         }
     }
 
-    fn float_rhs_safe(var: &str, e: &Expr) -> bool {
+    fn frhs_safe(var: &str, e: &Expr) -> bool {
         match e {
 
             Expr::Ident(n) => {
@@ -513,16 +513,16 @@ impl Codegen {
             }
             Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Nil => true,
 
-            Expr::Unary { expr, .. } => Self::float_rhs_safe(var, expr),
+            Expr::Unary { expr, .. } => Self::frhs_safe(var, expr),
             Expr::Binary { lhs, rhs, .. } => {
-                Self::float_rhs_safe(var, lhs) && Self::float_rhs_safe(var, rhs)
+                Self::frhs_safe(var, lhs) && Self::frhs_safe(var, rhs)
             }
 
-            other => !Self::ident_used_in_expr(var, other),
+            other => !Self::used_expr(var, other),
         }
     }
 
-    fn acquire_xmm_reg(&self, ctx: &mut FnCtx) -> Option<&'static str> {
+    fn take_xmm(&self, ctx: &mut FnCtx) -> Option<&'static str> {
         if ctx.next_xmm >= XMM_POOL.len() {
             return None;
         }
@@ -535,15 +535,15 @@ impl Codegen {
         Some(reg)
     }
 
-    fn has_self_tail_call(body: &[Stmt], fname: &str) -> bool {
-        body.iter().any(|s| Self::stmt_has_tail_call(s, fname))
+    fn has_tailcall(body: &[Stmt], fname: &str) -> bool {
+        body.iter().any(|s| Self::stmt_tailcall(s, fname))
     }
 
     // Peels a leading `if cond { return x }` guard off a raw function and emits it
     // as a pre-prologue branch straight into registers (no frame, no spill). This
     // is the recursion base-case fast path, e.g. fib(n) returning early for n < 2.
     // Returns the asm plus how many body statements were consumed.
-    fn raw_base_fast(&mut self, f: &FnDef, raw_abi: bool) -> Option<(String, usize)> {
+    fn raw_base(&mut self, f: &FnDef, raw_abi: bool) -> Option<(String, usize)> {
         if !raw_abi {
             return None;
         }
@@ -596,7 +596,7 @@ impl Codegen {
         };
 
         let (op, lhs, rhs) = match cond {
-            Expr::Binary { op, lhs, rhs } if Self::is_cmp_op(*op) => (*op, &**lhs, &**rhs),
+            Expr::Binary { op, lhs, rhs } if Self::is_cmpop(*op) => (*op, &**lhs, &**rhs),
             _ => return None,
         };
 
@@ -612,7 +612,7 @@ impl Codegen {
         };
 
         let skip = self.new_label("noskip");
-        let jcc_false = Self::jcc_for_cmp_false(op);
+        let jcc_false = Self::jcc_cfalse(op);
         let mut fast = String::new();
         let _ = writeln!(fast, "    cmp {lhs_reg}, {rhs_str}");
         let _ = writeln!(fast, "    {jcc_false} {skip}");
@@ -624,14 +624,14 @@ impl Codegen {
         Some((fast, idx + 1))
     }
 
-    fn is_cmp_op(op: BinOp) -> bool {
+    fn is_cmpop(op: BinOp) -> bool {
         matches!(
             op,
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
         )
     }
 
-    fn jcc_for_cmp_false(op: BinOp) -> &'static str {
+    fn jcc_cfalse(op: BinOp) -> &'static str {
         match op {
             BinOp::Lt => "jge",
             BinOp::Le => "jg",
@@ -639,68 +639,68 @@ impl Codegen {
             BinOp::Ge => "jl",
             BinOp::Eq => "jne",
             BinOp::Ne => "je",
-            _ => unreachable!("jcc_for_cmp_false on non-comparison"),
+            _ => unreachable!("jcc_cfalse on non-comparison"),
         }
     }
 
-    fn body_no_alloc(body: &[Stmt]) -> bool {
-        body.iter().all(Self::stmt_no_alloc)
+    fn body_noalloc(body: &[Stmt]) -> bool {
+        body.iter().all(Self::stmt_noalloc)
     }
 
-    fn stmt_no_alloc(s: &Stmt) -> bool {
+    fn stmt_noalloc(s: &Stmt) -> bool {
         match s {
-            Stmt::Let { value, .. } => Self::expr_no_alloc(value),
+            Stmt::Let { value, .. } => Self::expr_noalloc(value),
             Stmt::Assign { target, value } => {
-                Self::expr_no_alloc(target) && Self::expr_no_alloc(value)
+                Self::expr_noalloc(target) && Self::expr_noalloc(value)
             }
-            Stmt::ExprStmt(e) => Self::expr_no_alloc(e),
-            Stmt::Return(opt) => opt.as_ref().map(Self::expr_no_alloc).unwrap_or(true),
+            Stmt::ExprStmt(e) => Self::expr_noalloc(e),
+            Stmt::Return(opt) => opt.as_ref().map(Self::expr_noalloc).unwrap_or(true),
             Stmt::If {
                 cond,
                 then,
                 elifs,
                 els,
             } => {
-                Self::expr_no_alloc(cond)
-                    && then.iter().all(Self::stmt_no_alloc)
+                Self::expr_noalloc(cond)
+                    && then.iter().all(Self::stmt_noalloc)
                     && elifs
                         .iter()
-                        .all(|(c, b)| Self::expr_no_alloc(c) && b.iter().all(Self::stmt_no_alloc))
+                        .all(|(c, b)| Self::expr_noalloc(c) && b.iter().all(Self::stmt_noalloc))
                     && els
                         .as_ref()
-                        .map(|b| b.iter().all(Self::stmt_no_alloc))
+                        .map(|b| b.iter().all(Self::stmt_noalloc))
                         .unwrap_or(true)
             }
             Stmt::While { cond, body } => {
-                Self::expr_no_alloc(cond) && body.iter().all(Self::stmt_no_alloc)
+                Self::expr_noalloc(cond) && body.iter().all(Self::stmt_noalloc)
             }
             Stmt::For { iter, body, .. } => {
-                Self::expr_no_alloc(iter) && body.iter().all(Self::stmt_no_alloc)
+                Self::expr_noalloc(iter) && body.iter().all(Self::stmt_noalloc)
             }
             Stmt::Try {
                 body, catch_body, ..
-            } => body.iter().all(Self::stmt_no_alloc) && catch_body.iter().all(Self::stmt_no_alloc),
+            } => body.iter().all(Self::stmt_noalloc) && catch_body.iter().all(Self::stmt_noalloc),
 
             Stmt::Raise(_) => false,
             Stmt::Break | Stmt::Continue | Stmt::SrcLine(_) => true,
         }
     }
 
-    fn expr_no_alloc(e: &Expr) -> bool {
+    fn expr_noalloc(e: &Expr) -> bool {
         match e {
             Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Nil | Expr::Ident(_) => true,
-            Expr::Unary { expr, .. } => Self::expr_no_alloc(expr),
-            Expr::Binary { lhs, rhs, .. } => Self::expr_no_alloc(lhs) && Self::expr_no_alloc(rhs),
-            Expr::Range { lo, hi } => Self::expr_no_alloc(lo) && Self::expr_no_alloc(hi),
+            Expr::Unary { expr, .. } => Self::expr_noalloc(expr),
+            Expr::Binary { lhs, rhs, .. } => Self::expr_noalloc(lhs) && Self::expr_noalloc(rhs),
+            Expr::Range { lo, hi } => Self::expr_noalloc(lo) && Self::expr_noalloc(hi),
             Expr::IfElse { cond, then, els } => {
-                Self::expr_no_alloc(cond) && Self::expr_no_alloc(then) && Self::expr_no_alloc(els)
+                Self::expr_noalloc(cond) && Self::expr_noalloc(then) && Self::expr_noalloc(els)
             }
 
             _ => false,
         }
     }
 
-    fn stmt_has_tail_call(s: &Stmt, fname: &str) -> bool {
+    fn stmt_tailcall(s: &Stmt, fname: &str) -> bool {
         match s {
             Stmt::Return(Some(Expr::Call { callee, .. })) => {
                 matches!(&**callee, Expr::Ident(n) if n == fname)
@@ -708,23 +708,23 @@ impl Codegen {
             Stmt::If {
                 then, elifs, els, ..
             } => {
-                then.iter().any(|s| Self::stmt_has_tail_call(s, fname))
+                then.iter().any(|s| Self::stmt_tailcall(s, fname))
                     || elifs
                         .iter()
-                        .any(|(_, b)| b.iter().any(|s| Self::stmt_has_tail_call(s, fname)))
+                        .any(|(_, b)| b.iter().any(|s| Self::stmt_tailcall(s, fname)))
                     || els
                         .as_ref()
-                        .is_some_and(|b| b.iter().any(|s| Self::stmt_has_tail_call(s, fname)))
+                        .is_some_and(|b| b.iter().any(|s| Self::stmt_tailcall(s, fname)))
             }
             _ => false,
         }
     }
 
-    fn gen_fn_raw(&mut self, sym: &str, f: &FnDef) -> Result<String, String> {
-        self.gen_fn_impl(sym, f, None, true)
+    fn gen_raw(&mut self, sym: &str, f: &FnDef) -> Result<String, String> {
+        self.gen_impl(sym, f, None, true)
     }
 
-    fn gen_fn_impl(
+    fn gen_impl(
         &mut self,
         sym: &str,
         f: &FnDef,
@@ -738,7 +738,7 @@ impl Codegen {
         let mut mir_body: Option<String> = None;
         if mir_on && raw_abi && crate::mir::mir_eligible(f, &self.int_info) {
             if let Ok(mir) = crate::mir::lower_fn(f, &self.mir_sigs) {
-                if Self::mir_all_int(&mir) {
+                if Self::mir_allint(&mir) {
                     let ra = crate::mir::regalloc(&mir);
 
                     let mut mctx = FnCtx {
@@ -779,7 +779,7 @@ impl Codegen {
                             let _ = writeln!(mprologue, "    mov [rbp{off}], rax");
                         }
                     }
-                    if let Ok(body) = self.gen_fn_mir_body(&mir, &ra, f, &mut mctx) {
+                    if let Ok(body) = self.gen_mirbody(&mir, &ra, f, &mut mctx) {
 
                         let mut save = String::new();
                         let mut restore = String::new();
@@ -882,7 +882,7 @@ impl Codegen {
         // param slots and jump back to a label just after the prologue. Only
         // for plain functions (no struct_hint/method) so the frame layout is
         // stable across iterations. Records each param's slot and rawness.
-        if ctx.struct_hint.is_none() && !f.is_method && Self::has_self_tail_call(&f.body, &f.name) {
+        if ctx.struct_hint.is_none() && !f.is_method && Self::has_tailcall(&f.body, &f.name) {
             let label = self.new_label("tailtop");
             let tparams: Vec<(i32, bool)> = f
                 .params
@@ -901,7 +901,7 @@ impl Codegen {
 
         let mut fastpath = String::new();
         let body_start = if ctx.tail_label.is_none() {
-            match self.raw_base_fast(f, raw_abi) {
+            match self.raw_base(f, raw_abi) {
                 Some((fast, start)) => {
                     fastpath = fast;
                     start
@@ -971,7 +971,7 @@ impl Codegen {
         -ctx.stack_size
     }
 
-    fn acquire_callee_reg(&self, ctx: &mut FnCtx) -> Option<&'static str> {
+    fn take_callee(&self, ctx: &mut FnCtx) -> Option<&'static str> {
         if ctx.next_callee >= CALLEE_POOL.len() {
             return None;
         }
@@ -991,9 +991,9 @@ impl Codegen {
 
                     self.eval_raw(value, ctx, out)?;
                     let _ = writeln!(out, "    mov [rbp{off}], rax");
-                } else if ctx.is_raw_float(name) {
+                } else if ctx.raw_fval(name) {
 
-                    self.eval_raw_float(value, ctx, out)?;
+                    self.eval_rfloat(value, ctx, out)?;
 
                     if let Some(reg) = ctx.float_loc.get(name) {
                         let _ = writeln!(out, "    movapd {reg}, xmm0");
@@ -1015,8 +1015,8 @@ impl Codegen {
                         } else {
                             let _ = writeln!(out, "    mov [rbp{off}], rax");
                         }
-                    } else if ctx.is_raw_float(n) {
-                        self.eval_raw_float(value, ctx, out)?;
+                    } else if ctx.raw_fval(n) {
+                        self.eval_rfloat(value, ctx, out)?;
 
                         if let Some(reg) = ctx.float_loc.get(n) {
                             let _ = writeln!(out, "    movapd {reg}, xmm0");
@@ -1091,7 +1091,7 @@ impl Codegen {
                                 let _ = writeln!(out, "    mov [rbp{slot}], rax");
                             }
 
-                            self.emit_gc_poll(out);
+                            self.emit_poll(out);
                             let _ = writeln!(out, "    jmp {lbl}");
                             return Ok(());
                         }
@@ -1119,14 +1119,14 @@ impl Codegen {
             } => {
                 let end = self.new_label("ifend");
                 let next = self.new_label("ifnext");
-                self.gen_cond_false(cond, ctx, out, &next)?;
+                self.cond_false(cond, ctx, out, &next)?;
                 for st in then {
                     self.gen_stmt(st, ctx, out)?;
                 }
                 let _ = writeln!(out, "    jmp {end}\n{next}:");
                 for (c, body) in elifs {
                     let n2 = self.new_label("ifnext");
-                    self.gen_cond_false(c, ctx, out, &n2)?;
+                    self.cond_false(c, ctx, out, &n2)?;
                     for st in body {
                         self.gen_stmt(st, ctx, out)?;
                     }
@@ -1156,11 +1156,11 @@ impl Codegen {
                             ..
                         } = st
                         {
-                            if ctx.is_raw_float(v)
+                            if ctx.raw_fval(v)
                                 && !ctx.float_loc.contains_key(v)
                                 && !seen.contains(v)
-                                && !Self::ident_used_in_expr(v, cond)
-                                && Self::float_accum_safe(v, body)
+                                && !Self::used_expr(v, cond)
+                                && Self::faccum_safe(v, body)
                             {
                                 seen.insert(v.clone());
                                 promoted.push(v.clone());
@@ -1169,7 +1169,7 @@ impl Codegen {
                     }
                     promoted.sort();
                     for v in &promoted {
-                        if let Some(reg) = self.acquire_xmm_reg(ctx) {
+                        if let Some(reg) = self.take_xmm(ctx) {
                             let off = *ctx.locals.get(v).expect("raw-float local has a slot");
                             let _ = writeln!(out, "    movsd xmm0, qword ptr [rbp{off}]");
                             let _ = writeln!(out, "    movapd {reg}, xmm0");
@@ -1182,8 +1182,8 @@ impl Codegen {
                 let top = self.new_label("wtop");
                 let end = self.new_label("wend");
                 let _ = writeln!(out, "{top}:");
-                self.gen_cond_false(cond, ctx, out, &end)?;
-                self.emit_gc_poll_cond(body, out);
+                self.cond_false(cond, ctx, out, &end)?;
+                self.poll_cond(body, out);
                 ctx.loop_stack.push((top.clone(), end.clone()));
                 for st in body {
                     self.gen_stmt(st, ctx, out)?;
@@ -1197,8 +1197,8 @@ impl Codegen {
                 }
             }
             Stmt::For { var, iter, body } => match iter {
-                Expr::Range { lo, hi } => self.gen_for_range(var, lo, hi, body, ctx, out)?,
-                _ => self.gen_for_list(var, iter, body, ctx, out)?,
+                Expr::Range { lo, hi } => self.gen_range(var, lo, hi, body, ctx, out)?,
+                _ => self.gen_forlist(var, iter, body, ctx, out)?,
             },
             Stmt::Break => {
                 let end = ctx.loop_stack.last().ok_or("break outside loop")?.1.clone();
@@ -1259,7 +1259,7 @@ impl Codegen {
         Ok(())
     }
 
-    fn gen_for_range(
+    fn gen_range(
         &mut self,
         var: &str,
         lo: &Expr,
@@ -1269,8 +1269,8 @@ impl Codegen {
         out: &mut String,
     ) -> Result<(), String> {
 
-        let ci = self.acquire_callee_reg(ctx);
-        let li = self.acquire_callee_reg(ctx);
+        let ci = self.take_callee(ctx);
+        let li = self.take_callee(ctx);
 
         let (counter, limit, use_regs): (String, String, bool) = match (ci, li) {
             (Some(c), Some(l)) => (c.to_string(), l.to_string(), true),
@@ -1282,10 +1282,10 @@ impl Codegen {
         };
 
         self.gen_expr(lo, ctx, out)?;
-        Self::emit_unbox_int(out);
+        Self::emit_unbox(out);
         let _ = writeln!(out, "    mov {counter}, rax");
         self.gen_expr(hi, ctx, out)?;
-        Self::emit_unbox_int(out);
+        Self::emit_unbox(out);
         let _ = writeln!(out, "    mov {limit}, rax");
         let ioff = self.slot(ctx, var);
         let var_raw = ctx.is_raw(var);
@@ -1300,10 +1300,10 @@ impl Codegen {
                 } = st
                 {
                     if v != var
-                        && ctx.is_raw_float(v)
+                        && ctx.raw_fval(v)
                         && !ctx.float_loc.contains_key(v)
                         && !seen.contains(v)
-                        && Self::float_accum_safe(v, body)
+                        && Self::faccum_safe(v, body)
                     {
                         seen.insert(v.clone());
                         promoted.push(v.clone());
@@ -1315,7 +1315,7 @@ impl Codegen {
 
         let mut promoted_active: Vec<(String, &'static str, i32)> = Vec::new();
         for v in &promoted {
-            if let Some(reg) = self.acquire_xmm_reg(ctx) {
+            if let Some(reg) = self.take_xmm(ctx) {
                 let off = *ctx.locals.get(v).expect("raw-float local has a slot");
 
                 let _ = writeln!(out, "    movsd xmm0, qword ptr [rbp{off}]");
@@ -1329,7 +1329,7 @@ impl Codegen {
         // into a callee-saved GPR for the loop, so the body uses register arithmetic
         // instead of load/store to its slot. Same safety discipline as floats: the
         // var must be raw-int, not the loop var, not already register-mapped, and
-        // only ever read-as-value (int_accum_safe). Flushed back to its slot at loop
+        // only ever read-as-value (iaccum_safe). Flushed back to its slot at loop
         // exit. Callee-saved so it survives any call in the body (e.g. an index slow
         // path). Reuses int_loc which the ident/eval_raw paths already honor.
         let mut int_promoted: Vec<String> = Vec::new();
@@ -1345,7 +1345,7 @@ impl Codegen {
                         && ctx.is_raw(v)
                         && !ctx.int_loc.contains_key(v)
                         && !seen.contains(v)
-                        && Self::int_accum_safe(v, body)
+                        && Self::iaccum_safe(v, body)
                     {
                         seen.insert(v.clone());
                         int_promoted.push(v.clone());
@@ -1356,7 +1356,7 @@ impl Codegen {
         int_promoted.sort();
         let mut int_promoted_active: Vec<(String, &'static str, i32)> = Vec::new();
         for v in &int_promoted {
-            if let Some(reg) = self.acquire_callee_reg(ctx) {
+            if let Some(reg) = self.take_callee(ctx) {
                 let off = *ctx.locals.get(v).expect("raw-int local has a slot");
                 let _ = writeln!(out, "    mov {reg}, [rbp{off}]");
                 ctx.int_loc.insert(v.clone(), reg.to_string());
@@ -1382,17 +1382,17 @@ impl Codegen {
 
         let mapped_loopvar = var_raw
             && use_regs
-            && Self::ident_used_in_body(var, body)
-            && !Self::assigned_in_body(var, body);
+            && Self::used_body(var, body)
+            && !Self::body_assigns(var, body);
         if mapped_loopvar {
             ctx.int_loc.insert(var.to_string(), counter.clone());
-        } else if Self::ident_used_in_body(var, body) {
+        } else if Self::used_body(var, body) {
             if !var_raw {
-                Self::emit_box_int(out);
+                Self::emit_box(out);
             }
             let _ = writeln!(out, "    mov [rbp{ioff}], rax");
         }
-        self.emit_gc_poll_cond(body, out);
+        self.poll_cond(body, out);
         ctx.loop_stack.push((cont.clone(), end.clone()));
         for st in body {
             self.gen_stmt(st, ctx, out)?;
@@ -1423,7 +1423,7 @@ impl Codegen {
         Ok(())
     }
 
-    fn gen_for_list(
+    fn gen_forlist(
         &mut self,
         var: &str,
         iter: &Expr,
@@ -1458,7 +1458,7 @@ impl Codegen {
         out.push_str("    call lumen_list_get\n");
         let voff = *ctx.locals.get(var).unwrap();
         let _ = writeln!(out, "    mov [rbp{voff}], rax");
-        self.emit_gc_poll(out);
+        self.emit_poll(out);
         ctx.loop_stack.push((cont.clone(), end.clone()));
         for st in body {
             self.gen_stmt(st, ctx, out)?;
@@ -1472,7 +1472,7 @@ impl Codegen {
         Ok(())
     }
 
-    fn gen_cond_false(
+    fn cond_false(
         &mut self,
         cond: &Expr,
         ctx: &mut FnCtx,
@@ -1492,10 +1492,10 @@ impl Codegen {
                 _ => None,
             };
             if let Some(jcc) = cc_false {
-                if self.expr_known_int(lhs, ctx) && self.expr_known_int(rhs, ctx) {
+                if self.is_kint(lhs, ctx) && self.is_kint(rhs, ctx) {
 
-                    let lhs_simple = self.simple_raw_operand(lhs, ctx);
-                    let rhs_simple = self.simple_raw_operand(rhs, ctx);
+                    let lhs_simple = self.simple_rop(lhs, ctx);
+                    let rhs_simple = self.simple_rop(rhs, ctx);
                     match (&lhs_simple, &rhs_simple) {
                         (Some(l), Some(r)) => {
                             let _ = writeln!(out, "    mov r8, {l}");
@@ -1527,7 +1527,7 @@ impl Codegen {
             }
         }
         self.gen_expr(cond, ctx, out)?;
-        if Self::expr_is_bool(cond) {
+        if Self::is_bool(cond) {
 
             out.push_str("    test al, 1\n");
             let _ = writeln!(out, "    jz {target}");
@@ -1539,7 +1539,7 @@ impl Codegen {
         Ok(())
     }
 
-    fn expr_is_bool(e: &Expr) -> bool {
+    fn is_bool(e: &Expr) -> bool {
         match e {
             Expr::Bool(_) => true,
             Expr::Binary { op, .. } => matches!(
@@ -1617,12 +1617,12 @@ impl Codegen {
                 if let Some(reg) = ctx.int_loc.get(n) {
 
                     let _ = writeln!(out, "    mov rax, {reg}");
-                    Self::emit_box_int(out);
+                    Self::emit_box(out);
                 } else if let Some(&off) = ctx.locals.get(n) {
                     let _ = writeln!(out, "    mov rax, [rbp{off}]");
                     if ctx.is_raw(n) {
 
-                        Self::emit_box_int(out);
+                        Self::emit_box(out);
                     }
 
                 } else if let Some(f) = self.fns.get(n) {
@@ -1713,7 +1713,7 @@ impl Codegen {
             }
             Expr::Range { lo, hi } => {
 
-                self.gen_range_list(lo, hi, ctx, out)?;
+                self.gen_rangelist(lo, hi, ctx, out)?;
             }
 
             Expr::IfElse { cond, then, els } => {
@@ -1769,8 +1769,8 @@ impl Codegen {
             }
             Expr::Unary { op, expr } => {
 
-                if matches!(op, UnOp::Neg) && self.expr_known_float(expr, ctx) {
-                    self.eval_raw_float(e, ctx, out)?;
+                if matches!(op, UnOp::Neg) && self.is_kfloat(expr, ctx) {
+                    self.eval_rfloat(e, ctx, out)?;
                     out.push_str("    movq rax, xmm0\n");
                     return Ok(());
                 }
@@ -1788,12 +1788,12 @@ impl Codegen {
             Expr::Binary { op, lhs, rhs } => self.gen_binary(*op, lhs, rhs, ctx, out)?,
             Expr::Method { obj, name, args } => self.gen_method(obj, name, args, ctx, out)?,
             Expr::Call { callee, args } => self.gen_call(callee, args, ctx, out)?,
-            Expr::NamedCall { callee, args } => self.gen_named_call(callee, args, ctx, out)?,
+            Expr::NamedCall { callee, args } => self.gen_ncall(callee, args, ctx, out)?,
         }
         Ok(())
     }
 
-    fn gen_range_list(
+    fn gen_rangelist(
         &mut self,
         lo: &Expr,
         hi: &Expr,
@@ -1841,15 +1841,15 @@ impl Codegen {
         if matches!(
             op,
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
-        ) && self.expr_known_float(lhs, ctx)
-            && self.expr_known_float(rhs, ctx)
+        ) && self.is_kfloat(lhs, ctx)
+            && self.is_kfloat(rhs, ctx)
         {
             let e = Expr::Binary {
                 op,
                 lhs: Box::new(lhs.clone()),
                 rhs: Box::new(rhs.clone()),
             };
-            self.eval_raw_float(&e, ctx, out)?;
+            self.eval_rfloat(&e, ctx, out)?;
             out.push_str("    movq rax, xmm0\n");
             return Ok(());
         }
@@ -1880,10 +1880,10 @@ impl Codegen {
             _ => None,
         };
         if let Some(kind) = fast_kind {
-            if self.expr_known_int(lhs, ctx) && self.expr_known_int(rhs, ctx) {
+            if self.is_kint(lhs, ctx) && self.is_kint(rhs, ctx) {
 
-                let lhs_simple = self.simple_raw_operand(lhs, ctx);
-                let rhs_simple = self.simple_raw_operand(rhs, ctx);
+                let lhs_simple = self.simple_rop(lhs, ctx);
+                let rhs_simple = self.simple_rop(rhs, ctx);
                 match (&lhs_simple, &rhs_simple) {
                     (Some(l), Some(r)) => {
                         let _ = writeln!(out, "    mov r8, {l}");
@@ -1925,7 +1925,7 @@ impl Codegen {
                 } else {
                     let _ = writeln!(out, "    {kind} r8, r9");
                     out.push_str("    mov rax, r8\n");
-                    Self::emit_box_int(out);
+                    Self::emit_box(out);
                 }
                 return Ok(());
             }
@@ -1974,51 +1974,51 @@ impl Codegen {
             } else {
                 let _ = writeln!(out, "    {kind} r8, r9");
                 out.push_str("    mov rax, r8\n");
-                Self::emit_box_int(out);
+                Self::emit_box(out);
             }
             let _ = writeln!(out, "    jmp {done}");
             let _ = writeln!(out, "{slow}:");
 
             let _ = writeln!(out, "    mov rcx, [rbp{lt}]");
-            let f = Self::runtime_op_name(op);
+            let f = Self::op_name(op);
             let _ = writeln!(out, "    call {f}");
             let _ = writeln!(out, "{done}:");
             return Ok(());
         }
 
-        let f = Self::runtime_op_name(op);
+        let f = Self::op_name(op);
         let _ = writeln!(out, "    call {f}");
         Ok(())
     }
 
-    fn expr_known_int(&self, e: &Expr, ctx: &FnCtx) -> bool {
+    fn is_kint(&self, e: &Expr, ctx: &FnCtx) -> bool {
         match e {
             Expr::Int(_) => true,
-            Expr::Ident(n) => self.int_info.is_int_var(&ctx.func_name, n),
+            Expr::Ident(n) => self.int_info.is_ivar(&ctx.func_name, n),
             Expr::Unary {
                 op: UnOp::Neg,
                 expr,
-            } => self.expr_known_int(expr, ctx),
+            } => self.is_kint(expr, ctx),
             Expr::Binary { op, lhs, rhs } => {
                 matches!(
                     op,
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
-                ) && self.expr_known_int(lhs, ctx)
-                    && self.expr_known_int(rhs, ctx)
+                ) && self.is_kint(lhs, ctx)
+                    && self.is_kint(rhs, ctx)
             }
             Expr::Call { callee, .. } => {
                 matches!(&**callee, Expr::Ident(n) if self.int_info.int_ret.contains(n))
             }
             Expr::Index { obj, index } => {
                 matches!(&**obj, Expr::Ident(n)
-                    if self.int_info.is_int_list_var(&ctx.func_name, n))
+                    if self.int_info.is_ilist(&ctx.func_name, n))
                     && self.idx_intish(index, ctx)
             }
             _ => false,
         }
     }
 
-    fn simple_raw_operand(&self, e: &Expr, ctx: &FnCtx) -> Option<String> {
+    fn simple_rop(&self, e: &Expr, ctx: &FnCtx) -> Option<String> {
         match e {
             Expr::Int(n) => Some(format!("{n}")),
             Expr::Ident(n) if ctx.is_raw(n) => {
@@ -2036,7 +2036,7 @@ impl Codegen {
     // divisors with a shift (plus a bias so truncation rounds toward zero, not
     // negative infinity), and everything else via a precomputed magic multiply.
     // Mirrors what the interpreter does so both backends agree bit-for-bit.
-    fn emit_const_div(&mut self, d: i64, out: &mut String) {
+    fn const_div(&mut self, d: i64, out: &mut String) {
 
         if d == 1 {
             return;
@@ -2093,9 +2093,9 @@ impl Codegen {
         }
     }
 
-    fn simple_float_operand(&self, e: &Expr, ctx: &FnCtx) -> Option<String> {
+    fn simple_fop(&self, e: &Expr, ctx: &FnCtx) -> Option<String> {
         match e {
-            Expr::Ident(n) if ctx.is_raw_float(n) => {
+            Expr::Ident(n) if ctx.raw_fval(n) => {
 
                 if let Some(reg) = ctx.float_loc.get(n) {
                     return Some(reg.to_string());
@@ -2106,7 +2106,7 @@ impl Codegen {
         }
     }
 
-    fn fmt_xmm_src(op: &str) -> String {
+    fn fmt_xmm(op: &str) -> String {
         if op.starts_with("xmm") {
             op.to_string()
         } else {
@@ -2133,7 +2133,7 @@ impl Codegen {
             Expr::Unary {
                 op: UnOp::Neg,
                 expr,
-            } if self.expr_known_int(expr, ctx) => {
+            } if self.is_kint(expr, ctx) => {
                 self.eval_raw(expr, ctx, out)?;
                 out.push_str("    neg rax\n");
             }
@@ -2142,8 +2142,8 @@ impl Codegen {
                 if matches!(
                     op,
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
-                ) && self.expr_known_int(lhs, ctx)
-                    && self.expr_known_int(rhs, ctx) =>
+                ) && self.is_kint(lhs, ctx)
+                    && self.is_kint(rhs, ctx) =>
             {
 
                 if matches!(op, BinOp::Div | BinOp::Mod) {
@@ -2171,7 +2171,7 @@ impl Codegen {
                                 }
                                 let nt = self.temp(ctx);
                                 let _ = writeln!(out, "    mov [rbp{nt}], rax");
-                                self.emit_const_div(d, out);
+                                self.const_div(d, out);
 
                                 let _ = writeln!(out, "    movabs rcx, {d}");
                                 out.push_str("    imul rax, rcx\n");
@@ -2179,7 +2179,7 @@ impl Codegen {
                                 let _ = writeln!(out, "    mov rax, [rbp{nt}]");
                                 out.push_str("    sub rax, rcx\n");
                             } else {
-                                self.emit_const_div(d, out);
+                                self.const_div(d, out);
                             }
                             return Ok(());
                         }
@@ -2189,7 +2189,7 @@ impl Codegen {
 
                 if !matches!(op, BinOp::Div | BinOp::Mod) {
 
-                    if let Some(rhs_op) = self.simple_raw_operand(rhs, ctx) {
+                    if let Some(rhs_op) = self.simple_rop(rhs, ctx) {
                         self.eval_raw(lhs, ctx, out)?;
 
                         let imm32 = match &**rhs {
@@ -2219,7 +2219,7 @@ impl Codegen {
                         return Ok(());
                     }
 
-                    if let Some(lhs_op) = self.simple_raw_operand(lhs, ctx) {
+                    if let Some(lhs_op) = self.simple_rop(lhs, ctx) {
                         self.eval_raw(rhs, ctx, out)?;
                         match op {
                             BinOp::Add => {
@@ -2270,14 +2270,14 @@ impl Codegen {
                         out.push_str("    test rax, rax\n");
                         let _ = writeln!(out, "    jne {nz}");
 
-                        Self::emit_box_int(out);
+                        Self::emit_box(out);
                         out.push_str("    mov rdx, rax\n");
                         let _ = writeln!(out, "    mov rax, [rbp{lt}]");
-                        Self::emit_box_int(out);
+                        Self::emit_box(out);
                         out.push_str("    mov rcx, rax\n");
-                        let f = Self::runtime_op_name(*op);
+                        let f = Self::op_name(*op);
                         let _ = writeln!(out, "    call {f}");
-                        Self::emit_unbox_int(out);
+                        Self::emit_unbox(out);
                         let _ = writeln!(out, "    jmp {done}");
 
                         let _ = writeln!(out, "{nz}:");
@@ -2297,7 +2297,7 @@ impl Codegen {
                 op: BinOp::Pow,
                 lhs,
                 rhs,
-            } if self.expr_known_int(lhs, ctx)
+            } if self.is_kint(lhs, ctx)
                 && matches!(&**rhs, Expr::Int(e) if (0..=8).contains(e)) =>
             {
                 let exp = match &**rhs {
@@ -2326,7 +2326,7 @@ impl Codegen {
             // same error and stays byte-identical.
             Expr::Index { obj, index }
                 if matches!(&**obj, Expr::Ident(n)
-                    if self.int_info.is_int_list_var(&ctx.func_name, n))
+                    if self.int_info.is_ilist(&ctx.func_name, n))
                     && self.idx_intish(index, ctx) =>
             {
                 self.gen_expr(obj, ctx, out)?;
@@ -2352,16 +2352,16 @@ impl Codegen {
                 // items pointer at +32; element is a NaN-boxed int -> unbox into rax.
                 out.push_str("    mov r8, qword ptr [r8+32]\n");
                 out.push_str("    mov rax, qword ptr [r8+r9*8]\n");
-                Self::emit_unbox_int(out);
+                Self::emit_unbox(out);
                 let _ = writeln!(out, "    jmp {done}");
 
                 let _ = writeln!(out, "{slow}:");
                 let _ = writeln!(out, "    mov rax, [rbp{idxt}]");
-                Self::emit_box_int(out);
+                Self::emit_box(out);
                 out.push_str("    mov rdx, rax\n");
                 let _ = writeln!(out, "    mov rcx, [rbp{objt}]");
                 out.push_str("    call lumen_index_get\n");
-                Self::emit_unbox_int(out);
+                Self::emit_unbox(out);
                 let _ = writeln!(out, "{done}:");
             }
 
@@ -2376,36 +2376,36 @@ impl Codegen {
                             .get(n)
                             .is_some_and(|f| f.params.len() == args.len())
                     {
-                        self.emit_raw_call(n, args, ctx, out)?;
+                        self.raw_call(n, args, ctx, out)?;
                         return Ok(());
                     }
                 }
                 self.gen_expr(e, ctx, out)?;
-                Self::emit_unbox_int(out);
+                Self::emit_unbox(out);
             }
 
             _ => {
                 self.gen_expr(e, ctx, out)?;
-                Self::emit_unbox_int(out);
+                Self::emit_unbox(out);
             }
         }
         Ok(())
     }
 
-    fn expr_known_float(&self, e: &Expr, ctx: &FnCtx) -> bool {
+    fn is_kfloat(&self, e: &Expr, ctx: &FnCtx) -> bool {
         match e {
             Expr::Float(_) => true,
-            Expr::Ident(n) => self.int_info.is_float_var(&ctx.func_name, n),
+            Expr::Ident(n) => self.int_info.is_fvar(&ctx.func_name, n),
             Expr::Unary {
                 op: UnOp::Neg,
                 expr,
-            } => self.expr_known_float(expr, ctx),
+            } => self.is_kfloat(expr, ctx),
             Expr::Binary { op, lhs, rhs } => {
                 matches!(
                     op,
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
-                ) && self.expr_known_float(lhs, ctx)
-                    && self.expr_known_float(rhs, ctx)
+                ) && self.is_kfloat(lhs, ctx)
+                    && self.is_kfloat(rhs, ctx)
             }
             Expr::Call { callee, .. } => {
                 matches!(&**callee, Expr::Ident(n) if self.int_info.float_ret.contains(n))
@@ -2413,7 +2413,7 @@ impl Codegen {
 
             Expr::Index { obj, index } => {
                 matches!(&**obj, Expr::Ident(n)
-                    if self.int_info.is_float_list_var(&ctx.func_name, n))
+                    if self.int_info.is_flist(&ctx.func_name, n))
                     && self.idx_intish(index, ctx)
             }
             _ => false,
@@ -2423,7 +2423,7 @@ impl Codegen {
     fn idx_intish(&self, e: &Expr, ctx: &FnCtx) -> bool {
         match e {
             Expr::Int(_) => true,
-            Expr::Ident(n) => self.int_info.is_int_var(&ctx.func_name, n) || ctx.is_raw(n),
+            Expr::Ident(n) => self.int_info.is_ivar(&ctx.func_name, n) || ctx.is_raw(n),
             Expr::Binary { op, lhs, rhs } => {
                 matches!(
                     op,
@@ -2435,7 +2435,7 @@ impl Codegen {
         }
     }
 
-    fn eval_raw_float(
+    fn eval_rfloat(
         &mut self,
         e: &Expr,
         ctx: &mut FnCtx,
@@ -2448,7 +2448,7 @@ impl Codegen {
                 let _ = writeln!(out, "    movsd xmm0, qword ptr [rip + {lbl}]");
             }
 
-            Expr::Ident(n) if ctx.is_raw_float(n) => {
+            Expr::Ident(n) if ctx.raw_fval(n) => {
 
                 if let Some(reg) = ctx.float_loc.get(n) {
                     let _ = writeln!(out, "    movapd xmm0, {reg}");
@@ -2464,8 +2464,8 @@ impl Codegen {
             Expr::Unary {
                 op: UnOp::Neg,
                 expr,
-            } if self.expr_known_float(expr, ctx) => {
-                self.eval_raw_float(expr, ctx, out)?;
+            } if self.is_kfloat(expr, ctx) => {
+                self.eval_rfloat(expr, ctx, out)?;
                 out.push_str("    movq rax, xmm0\n");
                 out.push_str("    mov rcx, 0x8000000000000000\n    xor rax, rcx\n");
                 out.push_str("    movq xmm0, rax\n");
@@ -2475,14 +2475,14 @@ impl Codegen {
                 if matches!(
                     op,
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
-                ) && self.expr_known_float(lhs, ctx)
-                    && self.expr_known_float(rhs, ctx) =>
+                ) && self.is_kfloat(lhs, ctx)
+                    && self.is_kfloat(rhs, ctx) =>
             {
 
                 if !matches!(op, BinOp::Mod) {
 
-                    if let Some(rhs_op) = self.simple_float_operand(rhs, ctx) {
-                        self.eval_raw_float(lhs, ctx, out)?;
+                    if let Some(rhs_op) = self.simple_fop(rhs, ctx) {
+                        self.eval_rfloat(lhs, ctx, out)?;
                         let ins = match op {
                             BinOp::Add => "addsd",
                             BinOp::Sub => "subsd",
@@ -2490,14 +2490,14 @@ impl Codegen {
                             BinOp::Div => "divsd",
                             _ => unreachable!(),
                         };
-                        let _ = writeln!(out, "    {} xmm0, {}", ins, Self::fmt_xmm_src(&rhs_op));
+                        let _ = writeln!(out, "    {} xmm0, {}", ins, Self::fmt_xmm(&rhs_op));
                         return Ok(());
                     }
 
-                    if let Some(lhs_op) = self.simple_float_operand(lhs, ctx) {
+                    if let Some(lhs_op) = self.simple_fop(lhs, ctx) {
                         match op {
                             BinOp::Add | BinOp::Mul => {
-                                self.eval_raw_float(rhs, ctx, out)?;
+                                self.eval_rfloat(rhs, ctx, out)?;
                                 let ins = if matches!(op, BinOp::Add) {
                                     "addsd"
                                 } else {
@@ -2507,12 +2507,12 @@ impl Codegen {
                                     out,
                                     "    {} xmm0, {}",
                                     ins,
-                                    Self::fmt_xmm_src(&lhs_op)
+                                    Self::fmt_xmm(&lhs_op)
                                 );
                             }
                             BinOp::Sub | BinOp::Div => {
 
-                                self.eval_raw_float(rhs, ctx, out)?;
+                                self.eval_rfloat(rhs, ctx, out)?;
                                 out.push_str("    movapd xmm1, xmm0\n");
 
                                 if lhs_op.starts_with("xmm") {
@@ -2533,10 +2533,10 @@ impl Codegen {
                     }
                 }
 
-                self.eval_raw_float(lhs, ctx, out)?;
+                self.eval_rfloat(lhs, ctx, out)?;
                 let lt = self.temp(ctx);
                 let _ = writeln!(out, "    movsd qword ptr [rbp{lt}], xmm0");
-                self.eval_raw_float(rhs, ctx, out)?;
+                self.eval_rfloat(rhs, ctx, out)?;
                 out.push_str("    movapd xmm1, xmm0\n");
                 let _ = writeln!(out, "    movsd xmm0, qword ptr [rbp{lt}]");
                 match op {
@@ -2560,7 +2560,7 @@ impl Codegen {
 
             Expr::Index { obj, index }
                 if matches!(&**obj, Expr::Ident(n)
-                    if self.int_info.is_float_list_var(&ctx.func_name, n))
+                    if self.int_info.is_flist(&ctx.func_name, n))
                     && self.idx_intish(index, ctx) =>
             {
 
@@ -2590,7 +2590,7 @@ impl Codegen {
 
                 let _ = writeln!(out, "{slow}:");
                 let _ = writeln!(out, "    mov rax, [rbp{idxt}]");
-                Self::emit_box_int(out);
+                Self::emit_box(out);
                 out.push_str("    mov rdx, rax\n");
                 let _ = writeln!(out, "    mov rcx, [rbp{objt}]");
                 out.push_str("    call lumen_index_get\n");
@@ -2614,7 +2614,7 @@ impl Codegen {
         Ok(())
     }
 
-    fn runtime_op_name(op: BinOp) -> &'static str {
+    fn op_name(op: BinOp) -> &'static str {
         match op {
             BinOp::Add => "lumen_add",
             BinOp::Sub => "lumen_sub",
@@ -2642,7 +2642,7 @@ impl Codegen {
     ) -> Result<(), String> {
 
         out.push_str("    lea rcx, [rip + .empty_str]\n    call lumen_str_new\n");
-        self.want_empty_str();
+        self.want_empty();
         let acc = self.temp(ctx);
         let _ = writeln!(out, "    mov [rbp{acc}], rax");
         for p in parts {
@@ -2666,7 +2666,7 @@ impl Codegen {
         Ok(())
     }
 
-    fn want_empty_str(&mut self) {
+    fn want_empty(&mut self) {
         if !self.field_tables.contains(".empty_str:") {
             self.field_tables.push_str(".empty_str: .asciz \"\"\n");
         }
@@ -2877,7 +2877,7 @@ impl Codegen {
                 let _ = writeln!(out, "    mov [rbp{t}], rax");
                 slots.push(t);
             }
-            self.emit_win64_call(&sym, &slots, out);
+            self.win64_call(&sym, &slots, out);
             return Ok(());
         }
         Err(self.err(format!(
@@ -2913,11 +2913,11 @@ impl Codegen {
         let name = match callee {
             Expr::Ident(n) => n.clone(),
 
-            other => return self.gen_indirect_call(other, args, ctx, out),
+            other => return self.gen_icall(other, args, ctx, out),
         };
 
         if ctx.locals.contains_key(&name) && !self.fns.contains_key(&name) {
-            return self.gen_indirect_call(callee, args, ctx, out);
+            return self.gen_icall(callee, args, ctx, out);
         }
 
         match name.as_str() {
@@ -3011,9 +3011,9 @@ impl Codegen {
 
             "range" => {
                 if args.len() == 1 {
-                    return self.gen_range_list(&Expr::Int(0), &args[0], ctx, out);
+                    return self.gen_rangelist(&Expr::Int(0), &args[0], ctx, out);
                 } else if args.len() == 2 {
-                    return self.gen_range_list(&args[0], &args[1], ctx, out);
+                    return self.gen_rangelist(&args[0], &args[1], ctx, out);
                 }
                 return Err("range() takes 1 or 2 args".into());
             }
@@ -3021,9 +3021,9 @@ impl Codegen {
         }
 
         if self.structs.contains_key(&name) {
-            return self.gen_struct_ctor(
+            return self.gen_struct(
                 &name,
-                &positional_to_named(&name, args, &self.structs)?,
+                &pos_named(&name, args, &self.structs)?,
                 ctx,
                 out,
             );
@@ -3048,7 +3048,7 @@ impl Codegen {
                 let _ = writeln!(out, "    mov [rbp{t}], rax");
                 slots.push(t);
             }
-            self.emit_win64_call(&Self::fnsym(&name), &slots, out);
+            self.win64_call(&Self::fnsym(&name), &slots, out);
             return Ok(());
         }
         Err(self.err(format!(
@@ -3056,7 +3056,7 @@ impl Codegen {
         )))
     }
 
-    fn gen_indirect_call(
+    fn gen_icall(
         &mut self,
         callee: &Expr,
         args: &[Expr],
@@ -3087,7 +3087,7 @@ impl Codegen {
         Ok(())
     }
 
-    fn emit_win64_call(&self, sym: &str, slots: &[i32], out: &mut String) {
+    fn win64_call(&self, sym: &str, slots: &[i32], out: &mut String) {
         let regs = ["rcx", "rdx", "r8", "r9"];
         let n = slots.len();
         if n <= 4 {
@@ -3121,7 +3121,7 @@ impl Codegen {
         let _ = writeln!(out, "    add rsp, {bytes}");
     }
 
-    fn emit_raw_call(
+    fn raw_call(
         &mut self,
         name: &str,
         args: &[Expr],
@@ -3172,7 +3172,7 @@ impl Codegen {
         Ok(())
     }
 
-    fn mir_all_int(mir: &crate::mir::MirFn) -> bool {
+    fn mir_allint(mir: &crate::mir::MirFn) -> bool {
         use crate::mir::Inst;
         if mir.ret_is_float || mir.param_is_float.iter().any(|&f| f) {
             return false;
@@ -3198,7 +3198,7 @@ impl Codegen {
         true
     }
 
-    fn gen_fn_mir_body(
+    fn gen_mirbody(
         &mut self,
         mir: &crate::mir::MirFn,
         ra: &crate::mir::RegAlloc,
@@ -3255,17 +3255,17 @@ impl Codegen {
 
                     Inst::Phi { .. } => {}
                     Inst::Move { dst, src } => {
-                        self.mir_load_val(src, "rax", ra, &mut vslot, &pslot, ctx, &mut out);
+                        self.load_val(src, "rax", ra, &mut vslot, &pslot, ctx, &mut out);
                         store_dst(ra, &mut vslot, ctx, &mut out, *dst);
                     }
                     Inst::Un { dst, op, a, wrap } => {
-                        self.mir_load_val(a, "rax", ra, &mut vslot, &pslot, ctx, &mut out);
+                        self.load_val(a, "rax", ra, &mut vslot, &pslot, ctx, &mut out);
                         match op {
                             UnKind::INeg => out.push_str("    neg rax\n"),
                             UnKind::FNeg => unreachable!("int-only MIR has no FNeg"),
                         }
                         if *wrap {
-                            Self::emit_unbox_int(&mut out);
+                            Self::emit_unbox(&mut out);
                         }
                         store_dst(ra, &mut vslot, ctx, &mut out, *dst);
                     }
@@ -3276,7 +3276,7 @@ impl Codegen {
                         b: bb,
                         wrap,
                     } => {
-                        self.mir_emit_bin(
+                        self.mir_bin(
                             *op, a, bb, *wrap, *dst, mir, ra, &mut vslot, &pslot, ctx, &mut out,
                         );
                     }
@@ -3287,7 +3287,7 @@ impl Codegen {
                         let regs = ["rcx", "rdx", "r8", "r9"];
                         let mut argslots = Vec::with_capacity(args.len());
                         for a in args {
-                            self.mir_load_val(a, "rax", ra, &mut vslot, &pslot, ctx, &mut out);
+                            self.load_val(a, "rax", ra, &mut vslot, &pslot, ctx, &mut out);
                             let t = self.temp(ctx);
                             let _ = writeln!(out, "    mov [rbp{t}], rax");
                             argslots.push(t);
@@ -3323,7 +3323,7 @@ impl Codegen {
                     }
                     Inst::Ret(opt) => {
                         if let Some(v) = opt {
-                            self.mir_load_val(v, "rax", ra, &mut vslot, &pslot, ctx, &mut out);
+                            self.load_val(v, "rax", ra, &mut vslot, &pslot, ctx, &mut out);
                         } else {
                             out.push_str("    xor eax, eax\n");
                         }
@@ -3331,22 +3331,22 @@ impl Codegen {
                         out.push_str("    mov rsp, rbp\n    pop rbp\n    ret\n");
                     }
                     Inst::Jmp(t) => {
-                        self.mir_edge_phis(b.id, *t, mir, ra, &mut vslot, &pslot, ctx, &mut out);
+                        self.edge_phis(b.id, *t, mir, ra, &mut vslot, &pslot, ctx, &mut out);
                         let _ = writeln!(out, "    jmp {}", blabel[t]);
                     }
                     Inst::Br { cond, t, f: fb } => {
 
-                        self.mir_load_val(cond, "rax", ra, &mut vslot, &pslot, ctx, &mut out);
+                        self.load_val(cond, "rax", ra, &mut vslot, &pslot, ctx, &mut out);
                         out.push_str("    test rax, rax\n");
                         let tramp_t = self.new_label("mbt");
                         let tramp_f = self.new_label("mbf");
                         let _ = writeln!(out, "    jne {tramp_t}");
                         let _ = writeln!(out, "    jmp {tramp_f}");
                         let _ = writeln!(out, "{tramp_t}:");
-                        self.mir_edge_phis(b.id, *t, mir, ra, &mut vslot, &pslot, ctx, &mut out);
+                        self.edge_phis(b.id, *t, mir, ra, &mut vslot, &pslot, ctx, &mut out);
                         let _ = writeln!(out, "    jmp {}", blabel[t]);
                         let _ = writeln!(out, "{tramp_f}:");
-                        self.mir_edge_phis(b.id, *fb, mir, ra, &mut vslot, &pslot, ctx, &mut out);
+                        self.edge_phis(b.id, *fb, mir, ra, &mut vslot, &pslot, ctx, &mut out);
                         let _ = writeln!(out, "    jmp {}", blabel[fb]);
                     }
                 }
@@ -3356,7 +3356,7 @@ impl Codegen {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn mir_edge_phis(
+    fn edge_phis(
         &mut self,
         from: u32,
         to: u32,
@@ -3384,7 +3384,7 @@ impl Codegen {
 
         let mut temps = Vec::with_capacity(moves.len());
         for (_, v) in &moves {
-            self.mir_load_val(v, "rax", ra, vslot, pslot, ctx, out);
+            self.load_val(v, "rax", ra, vslot, pslot, ctx, out);
             let t = self.temp(ctx);
             let _ = writeln!(out, "    mov [rbp{t}], rax");
             temps.push(t);
@@ -3408,7 +3408,7 @@ impl Codegen {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn mir_load_val(
+    fn load_val(
         &mut self,
         v: &crate::mir::Val,
         reg: &str,
@@ -3450,7 +3450,7 @@ impl Codegen {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn mir_emit_bin(
+    fn mir_bin(
         &mut self,
         op: crate::mir::BinKind,
         a: &crate::mir::Val,
@@ -3485,10 +3485,10 @@ impl Codegen {
 
         match op {
             IAdd | ISub | IMul => {
-                self.mir_load_val(a, "rax", ra, vslot, pslot, ctx, out);
+                self.load_val(a, "rax", ra, vslot, pslot, ctx, out);
                 let at = self.temp(ctx);
                 let _ = writeln!(out, "    mov [rbp{at}], rax");
-                self.mir_load_val(b, "rcx", ra, vslot, pslot, ctx, out);
+                self.load_val(b, "rcx", ra, vslot, pslot, ctx, out);
                 let _ = writeln!(out, "    mov rax, [rbp{at}]");
                 match op {
                     IAdd => out.push_str("    add rax, rcx\n"),
@@ -3497,22 +3497,22 @@ impl Codegen {
                     _ => unreachable!(),
                 }
                 if wrap {
-                    Self::emit_unbox_int(out);
+                    Self::emit_unbox(out);
                 }
                 store(out, vslot, ctx);
             }
             DivConst(d) => {
 
-                self.mir_load_val(a, "rax", ra, vslot, pslot, ctx, out);
-                self.emit_const_div(d, out);
+                self.load_val(a, "rax", ra, vslot, pslot, ctx, out);
+                self.const_div(d, out);
                 store(out, vslot, ctx);
             }
             ModConst(d) => {
 
-                self.mir_load_val(a, "rax", ra, vslot, pslot, ctx, out);
+                self.load_val(a, "rax", ra, vslot, pslot, ctx, out);
                 let nt = self.temp(ctx);
                 let _ = writeln!(out, "    mov [rbp{nt}], rax");
-                self.emit_const_div(d, out);
+                self.const_div(d, out);
                 let _ = writeln!(out, "    movabs rcx, {d}");
                 out.push_str("    imul rax, rcx\n");
                 out.push_str("    mov rcx, rax\n");
@@ -3522,10 +3522,10 @@ impl Codegen {
             }
             IDiv | IMod => {
 
-                self.mir_load_val(a, "rax", ra, vslot, pslot, ctx, out);
+                self.load_val(a, "rax", ra, vslot, pslot, ctx, out);
                 let nt = self.temp(ctx);
                 let _ = writeln!(out, "    mov [rbp{nt}], rax");
-                self.mir_load_val(b, "rax", ra, vslot, pslot, ctx, out);
+                self.load_val(b, "rax", ra, vslot, pslot, ctx, out);
                 if let Some(line) = mir.div_lines.get(&dst) {
                     let _ = writeln!(out, "    mov dword ptr [rip + lumen_current_line], {line}");
                 }
@@ -3534,10 +3534,10 @@ impl Codegen {
                 out.push_str("    test rax, rax\n");
                 let _ = writeln!(out, "    jne {nz}");
 
-                Self::emit_box_int(out);
+                Self::emit_box(out);
                 out.push_str("    mov rdx, rax\n");
                 let _ = writeln!(out, "    mov rax, [rbp{nt}]");
-                Self::emit_box_int(out);
+                Self::emit_box(out);
                 out.push_str("    mov rcx, rax\n");
                 let runtime = if matches!(op, IDiv) {
                     "lumen_div"
@@ -3545,7 +3545,7 @@ impl Codegen {
                     "lumen_mod"
                 };
                 let _ = writeln!(out, "    call {runtime}");
-                Self::emit_unbox_int(out);
+                Self::emit_unbox(out);
                 let _ = writeln!(out, "    jmp {done}");
 
                 let _ = writeln!(out, "{nz}:");
@@ -3559,10 +3559,10 @@ impl Codegen {
                 store(out, vslot, ctx);
             }
             IEq | INe | ILt | ILe | IGt | IGe => {
-                self.mir_load_val(a, "rax", ra, vslot, pslot, ctx, out);
+                self.load_val(a, "rax", ra, vslot, pslot, ctx, out);
                 let at = self.temp(ctx);
                 let _ = writeln!(out, "    mov [rbp{at}], rax");
-                self.mir_load_val(b, "rcx", ra, vslot, pslot, ctx, out);
+                self.load_val(b, "rcx", ra, vslot, pslot, ctx, out);
                 let _ = writeln!(out, "    mov rax, [rbp{at}]");
                 out.push_str("    cmp rax, rcx\n");
                 let cc = match op {
@@ -3585,7 +3585,7 @@ impl Codegen {
         }
     }
 
-    fn gen_named_call(
+    fn gen_ncall(
         &mut self,
         callee: &Expr,
         args: &[(String, Expr)],
@@ -3599,10 +3599,10 @@ impl Codegen {
         if !self.structs.contains_key(&name) {
             return Err(self.err(format!("no struct type named '{name}'")));
         }
-        self.gen_struct_ctor(&name, args, ctx, out)
+        self.gen_struct(&name, args, ctx, out)
     }
 
-    fn gen_struct_ctor(
+    fn gen_struct(
         &mut self,
         name: &str,
         args: &[(String, Expr)],
@@ -3732,7 +3732,7 @@ impl Codegen {
     }
 }
 
-fn positional_to_named(
+fn pos_named(
     name: &str,
     args: &[Expr],
     structs: &HashMap<String, StructDef>,
@@ -3773,7 +3773,7 @@ fn escape(s: &str) -> String {
 
 // Computes the magic multiplier and shift for signed division by a constant,
 // the classic Granlund-Montgomery / "Hacker's Delight" algorithm. Returns
-// (m, s) such that  n / d  ==  high64(n * m) adjusted by shift s. emit_const_div
+// (m, s) such that  n / d  ==  high64(n * m) adjusted by shift s. const_div
 // turns these into instructions; both must agree with the interpreter exactly.
 fn magic_signed(d_abs: u64) -> (i64, u32) {
 
@@ -3823,9 +3823,9 @@ fn peephole(asm: &str) -> String {
         let cur = lines[i];
 
         if i + 1 < lines.len() {
-            if let Some((mem, _)) = parse_store_rax(cur) {
+            if let Some((mem, _)) = parse_store(cur) {
                 let next = lines[i + 1];
-                if let Some((dst, src_mem)) = parse_mov_reg_mem(next) {
+                if let Some((dst, src_mem)) = parse_mov(next) {
                     if src_mem == mem {
                         out.push(cur.to_string());
                         if dst == "rax" {
@@ -3848,7 +3848,7 @@ fn peephole(asm: &str) -> String {
     s
 }
 
-fn parse_store_rax(line: &str) -> Option<(String, String)> {
+fn parse_store(line: &str) -> Option<(String, String)> {
     let t = line.trim();
     let rest = t.strip_prefix("mov ")?;
     let (lhs, rhs) = rest.split_once(", ")?;
@@ -3859,7 +3859,7 @@ fn parse_store_rax(line: &str) -> Option<(String, String)> {
     }
 }
 
-fn parse_mov_reg_mem(line: &str) -> Option<(String, String)> {
+fn parse_mov(line: &str) -> Option<(String, String)> {
     let t = line.trim();
     let rest = t.strip_prefix("mov ")?;
     let (lhs, rhs) = rest.split_once(", ")?;
@@ -4033,7 +4033,7 @@ mod magic_div_tests {
     // Models the exact instruction sequence emitted for `n % 2^k` (positive
     // power-of-two divisor): bias by sign, mask, subtract bias. Must equal
     // wrapping_rem so the masked path stays byte-identical to interp.
-    fn modeled_mask_rem(n: i64, d: i64) -> i64 {
+    fn mask_rem(n: i64, d: i64) -> i64 {
         let k = (d as u64).trailing_zeros();
         let rcx = ((n >> 63) as u64 >> (64 - k)) as i64; // sar 63; shr 64-k
         let r = n.wrapping_add(rcx) & (d - 1); // add; and mask
@@ -4057,7 +4057,7 @@ mod magic_div_tests {
         for &d in &pow2 {
             for &n in &ns {
                 assert_eq!(
-                    modeled_mask_rem(n, d),
+                    mask_rem(n, d),
                     n.wrapping_rem(d),
                     "mask % mismatch n={} d={}",
                     n,

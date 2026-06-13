@@ -100,7 +100,7 @@ fn main() {
     // Format per line: kind<TAB>name<TAB>line<TAB>col<TAB>end_col<TAB>parent
     // Runs pre-compile so it works on a single file without resolving imports.
     if cmd == "decls" {
-        match lumenc::parse_program_spanned(&src) {
+        match lumenc::parse_spanned(&src) {
             Ok((_, decls)) => {
                 for d in &decls {
                     let kind = match d.kind {
@@ -536,7 +536,7 @@ fn fatal(msg: &str) -> ! {
 }
 
 fn fatal_pretty(kind: &str, msg: &str, src: &str) -> ! {
-    let (headline, line_no) = match extract_line_no(msg) {
+    let (headline, line_no) = match find_lineno(msg) {
         Some(n) => {
             let trimmed = msg
                 .rfind(" (line ")
@@ -574,7 +574,7 @@ fn fatal_compile(err: CompileError, src: &str) -> ! {
     fatal_pretty(kind, &msg, src);
 }
 
-fn extract_line_no(msg: &str) -> Option<usize> {
+fn find_lineno(msg: &str) -> Option<usize> {
     let idx = msg.find("line ")? + 5;
     let digits: String = msg[idx..]
         .chars()

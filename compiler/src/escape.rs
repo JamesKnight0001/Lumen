@@ -1,42 +1,27 @@
 //! Escape analysis for arena allocation.
 //!
-//! Finds local bindings `let x = <list|map|struct literal/ctor>` that provably
-//! never escape their function, so the backend can bump-allocate them in a
-//! per-call arena and free them on return instead of burdening the GC.
+//! Finds `let x = <list|map|struct literal/ctor>` bindings that provably never
+//! escape their function, so the backend can bump-allocate them in a per-call
+//! arena and free them on return instead of burdening the GC.
 //!
-//! SOUNDNESS over completeness: a wrong "non-escaping" verdict is a
-//! use-after-free, so we qualify a binding only when EVERY use is on a tight
-//! whitelist of operations that cannot let the value outlive the call. Anything
-//! we don't understand disqualifies the binding (it stays a normal heap object).
+//! Soundness over completeness: a wrong "non-escaping" verdict is a
+//! use-after-free, so a binding qualifies only when EVERY use is on a tight
+//! whitelist. Anything we don't understand disqualifies it (stays a heap object).
 //!
-//! A binding `x` is disqualified if `x` ever:
-//!   - is returned,
-//!   - is passed as an argument to any call/method (could be retained),
-//!   - is stored into another value (list/map/struct element or field),
-//!   - is captured by a lambda/closure,
-//!   - is aliased (`y = x`, or used as the RHS that initializes another local),
-//!   - is reassigned after creation, or escapes via any construct we can't prove
-//!     local (it appears anywhere other than the safe positions below).
-//!
-//! Safe (non-escaping) positions for `x`:
-//!   - receiver of a method call `x.m(...)` (push/pop/keys/...): receiver itself
-//!     doesn't escape; its ARGS are checked separately for other candidates,
-//!   - object of an index/slice read `x[i]` / `x[a:b]` or index-assign target
-//!     `x[i] = v`,
-//!   - object of a field read `x.f` or field-assign target `x.f = v`,
-//!   - sole subject of `len/print/str/type/...` (non-retaining builtins),
-//!   - the iterable of `for _ in x:`,
-//!   - read inside arithmetic / comparison / a condition.
+//! `x` is disqualified if it is ever returned, passed to a call/method, stored
+//! into another value, captured by a closure, aliased (`y = x`), or reassigned.
+//! Safe positions: method receiver `x.m(..)`, index/field read or assign target,
+//! `len/print/str/..` arg, `for _ in x`, and plain reads in arithmetic/conditions.
 
 use crate::ast::{Expr, FStrPart, Item, Program, Stmt};
 use std::collections::HashSet;
 
-/// (function name, local variable name) pairs whose initializing collection may
-/// be arena-allocated. Name-keyed (not ordinal): safe because any binding that is
-/// reassigned or shadowed is disqualified, so the name maps to exactly one alloc.
+/// (function name, local name) pairs whose init collection may be arena-placed.
+/// Name-keyed: any reassigned/shadowed binding is disqualified, so a name maps
+/// to exactly one alloc.
 pub type ArenaSet = HashSet<(String, String)>;
-/// Builtins/methods that never retain their list/map receiver past the call.
-/// Conservative: only names we are sure about.
+
+/// Methods that never retain their list/map receiver past the call.
 fn safe_method(name: &str) -> bool {
     matches!(
         name,
@@ -46,15 +31,14 @@ fn safe_method(name: &str) -> bool {
     )
 }
 
-/// Non-retaining free builtins that take the value but don't store it.
+/// Free builtins that take the value but don't store it.
 fn safe_builtin(name: &str) -> bool {
     matches!(name, "len" | "print" | "println" | "str" | "type" | "drop" | "repr")
 }
 
 pub fn analyze(prog: &Program) -> ArenaSet {
     let mut out = ArenaSet::new();
-    // Struct names: a `let x = Name(...)` where Name is a struct is a fresh
-    // allocation just like a list/map literal.
+    // `let x = Name(...)` for a struct Name is a fresh alloc like a list literal.
     let structs: HashSet<String> = prog
         .iter()
         .filter_map(|i| match i {
@@ -62,10 +46,9 @@ pub fn analyze(prog: &Program) -> ArenaSet {
             _ => None,
         })
         .collect();
-    // Only free functions, keyed by name (matches llvmgen's ctx.func and the
-    // IntInfo convention). Struct methods are skipped: dispatch can alias their
-    // locals in ways this intra-procedural pass can't see, so they stay on the
-    // heap - correct, just not optimized.
+    // Free functions only, keyed by name (matches llvmgen's ctx.func). Struct
+    // methods are skipped: dispatch can alias their locals beyond what this
+    // intra-procedural pass sees, so they stay on the heap.
     for item in prog {
         if let Item::Fn(f) = item {
             analyze_fn(&f.name, &f.body, &structs, &mut out);
@@ -75,11 +58,10 @@ pub fn analyze(prog: &Program) -> ArenaSet {
 }
 
 fn analyze_fn(fname: &str, body: &[Stmt], structs: &HashSet<String>, out: &mut ArenaSet) {
-    // Pass 1: candidate locals = `let x = <fresh list/map/comprehension/struct>`.
     let mut candidates: Vec<String> = Vec::new();
     collect_candidates(body, structs, &mut candidates);
 
-    // Pass 2: a candidate qualifies only if no use escapes and it's bound once.
+    // A candidate qualifies only if no use escapes and it's bound exactly once.
     for name in &candidates {
         let mut esc = Escapes {
             name,
@@ -93,9 +75,9 @@ fn analyze_fn(fname: &str, body: &[Stmt], structs: &HashSet<String>, out: &mut A
     }
 }
 
-/// An expression that allocates a fresh heap object we could arena-place: a
-/// list/map literal, a comprehension, or a struct constructor `Name(...)`.
-fn is_fresh_alloc(e: &Expr, structs: &HashSet<String>) -> bool {
+/// A list/map literal, comprehension, or struct ctor `Name(...)`: a fresh heap
+/// object we could arena-place.
+fn fresh_alloc(e: &Expr, structs: &HashSet<String>) -> bool {
     match e {
         Expr::List(_) | Expr::Map(_) | Expr::ListComp { .. } => true,
         Expr::Call { callee, .. } | Expr::NamedCall { callee, .. } => {
@@ -109,7 +91,7 @@ fn collect_candidates(body: &[Stmt], structs: &HashSet<String>, out: &mut Vec<St
     for s in body {
         match s {
             Stmt::Let { name, value, .. } => {
-                if is_fresh_alloc(value, structs) {
+                if fresh_alloc(value, structs) {
                     out.push(name.clone());
                 }
             }
@@ -150,21 +132,19 @@ impl Escapes<'_> {
     fn walk_stmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Let { name, value, .. } => {
-                // `let y = x` aliases x -> escape. Also any escaping use inside value.
+                // `let y = x` aliases x -> escape.
                 if let Expr::Ident(n) = value {
                     if n == self.name {
                         self.escaped = true;
                     }
                 }
                 self.walk_expr(value);
-                // shadowing: a later `let x = ...` with our name rebinds; treat as
-                // an assignment so we don't wrongly arena a rebound name.
+                // a later `let x = ...` rebinds our name; count it as an assign.
                 if name == self.name {
                     self.assigns += 1;
                 }
             }
             Stmt::Assign { target, value } => {
-                // `x = ...` reassignment (counts); `other = x` aliases x.
                 if let Expr::Ident(t) = target {
                     if t == self.name {
                         self.assigns += 1;
@@ -172,22 +152,18 @@ impl Escapes<'_> {
                 }
                 if let Expr::Ident(v) = value {
                     if v == self.name {
-                        // x flows into another binding -> escape (unless that
-                        // binding IS x, i.e. x = x, which is a no-op).
+                        // x flows into another binding -> escape (x = x is a no-op).
                         if !matches!(target, Expr::Ident(t) if t == self.name) {
                             self.escaped = true;
                         }
                     }
                 }
-                // `target[i] = x` or `target.f = x` stores x into another object.
-                self.check_store_target(target, value);
-                // walk target's index/obj exprs for reads, and the value.
-                self.walk_assign_target(target);
+                self.check_store(target, value);
+                self.walk_target(target);
                 self.walk_expr(value);
             }
             Stmt::ExprStmt(e) => self.walk_expr(e),
             Stmt::Return(Some(e)) => {
-                // returning x (directly or nested) escapes.
                 if self.mentions(e) {
                     self.escaped = true;
                 }
@@ -210,8 +186,7 @@ impl Escapes<'_> {
                 self.walk_block(body);
             }
             Stmt::For { iter, body, .. } => {
-                // `for _ in x:` is a safe (non-escaping) read of x; but x nested
-                // inside a bigger iter expr is checked normally.
+                // `for _ in x` is a safe read; x inside a bigger iter is checked.
                 if !matches!(iter, Expr::Ident(n) if n == self.name) {
                     self.walk_expr(iter);
                 }
@@ -231,14 +206,13 @@ impl Escapes<'_> {
         }
     }
 
-    // store of x into another object's slot/field -> escape
-    fn check_store_target(&mut self, target: &Expr, value: &Expr) {
+    // store of x into another object's slot/field -> escape (x into itself is ok)
+    fn check_store(&mut self, target: &Expr, value: &Expr) {
         let stores_x = matches!(value, Expr::Ident(n) if n == self.name) || self.mentions(value);
         if !stores_x {
             return;
         }
         match target {
-            // x[i] = x  : storing x into x is still local (self-reference) -> ok
             Expr::Index { obj, .. } | Expr::Field { obj, .. } => {
                 if !matches!(&**obj, Expr::Ident(n) if n == self.name) {
                     self.escaped = true;
@@ -248,10 +222,10 @@ impl Escapes<'_> {
         }
     }
 
-    fn walk_assign_target(&mut self, target: &Expr) {
+    fn walk_target(&mut self, target: &Expr) {
         match target {
             Expr::Index { obj, index } => {
-                // x[i] = ... : obj==x is a safe in-place write; still walk index.
+                // x[i] = .. : obj==x is a safe in-place write; still walk index.
                 if !matches!(&**obj, Expr::Ident(n) if n == self.name) {
                     self.walk_expr(obj);
                 }
@@ -266,7 +240,7 @@ impl Escapes<'_> {
         }
     }
 
-    /// Does this expression mention our name anywhere (used for return/raise/store)?
+    /// Does this expression mention our name anywhere (for return/raise/store)?
     fn mentions(&self, e: &Expr) -> bool {
         match e {
             Expr::Ident(n) => n == self.name,
@@ -297,9 +271,8 @@ impl Escapes<'_> {
 
     fn walk_expr(&mut self, e: &Expr) {
         match e {
-            // x as a bare value in arithmetic/condition is a safe READ. We only
-            // flag escapes, which are detected at the specific escaping sites
-            // (return/store/call-arg/capture), so a plain Ident read is fine.
+            // A plain Ident read (arithmetic/condition) is safe; escapes are
+            // flagged at the specific escaping sites below.
             Expr::Ident(_) | Expr::Int(_) | Expr::Float(_) | Expr::Str(_)
             | Expr::Bool(_) | Expr::Nil | Expr::SelfExpr => {}
 
@@ -308,8 +281,7 @@ impl Escapes<'_> {
                 self.walk_expr(lhs);
                 self.walk_expr(rhs);
             }
-            // Passing x to ANY call (user or builtin) escapes, UNLESS it's a
-            // safe non-retaining builtin like len(x)/print(x).
+            // Passing x to any call escapes, unless it's a non-retaining builtin.
             Expr::Call { callee, args } => {
                 let safe = matches!(&**callee, Expr::Ident(n) if safe_builtin(n));
                 for a in args {
@@ -331,18 +303,17 @@ impl Escapes<'_> {
                 }
                 self.walk_expr(callee);
             }
-            // x.method(args): receiver x is safe if the method is non-retaining;
-            // otherwise escape. Args are always checked.
+            // x.method(args): receiver is safe only for non-retaining methods;
+            // args always escape.
             Expr::Method { obj, name, args } => {
-                let recv_is_x = matches!(&**obj, Expr::Ident(n) if n == self.name);
-                if recv_is_x && !safe_method(name) {
+                let recv_x = matches!(&**obj, Expr::Ident(n) if n == self.name);
+                if recv_x && !safe_method(name) {
                     self.escaped = true;
                 }
-                if !recv_is_x {
+                if !recv_x {
                     self.walk_expr(obj);
                 }
                 for a in args {
-                    // x passed as an arg to a method escapes (could be stored).
                     if matches!(a, Expr::Ident(n) if n == self.name) {
                         self.escaped = true;
                     } else {
@@ -351,7 +322,6 @@ impl Escapes<'_> {
                 }
             }
             Expr::Field { obj, .. } => {
-                // x.f read is safe; deeper obj walked.
                 if !matches!(&**obj, Expr::Ident(n) if n == self.name) {
                     self.walk_expr(obj);
                 }
@@ -373,8 +343,7 @@ impl Escapes<'_> {
                     self.walk_expr(x);
                 }
             }
-            // Storing x into a fresh list/map literal escapes (the literal may
-            // be returned/stored elsewhere).
+            // Storing x into a fresh literal escapes (the literal may leave).
             Expr::List(xs) => {
                 for x in xs {
                     if self.mentions(x) {
@@ -394,7 +363,7 @@ impl Escapes<'_> {
                 self.walk_expr(hi);
             }
             Expr::IfElse { cond, then, els } => {
-                // x as a branch result flows out of the expression -> escape.
+                // x as a branch result flows out -> escape.
                 if self.mentions(then) || self.mentions(els) {
                     self.escaped = true;
                 }
@@ -416,9 +385,9 @@ impl Escapes<'_> {
                     }
                 }
             }
-            // A lambda/closure that captures x extends its lifetime -> escape.
+            // Any lambda may capture x; a closure escapes only if it captures x.
             Expr::Lambda { .. } => {
-                self.escaped = true; // conservative: any lambda in scope may capture
+                self.escaped = true;
             }
             Expr::Closure { captures, .. } => {
                 if captures.iter().any(|c| self.mentions(c)) {

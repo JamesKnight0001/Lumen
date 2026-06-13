@@ -199,7 +199,7 @@ pub fn venv(dir: &str) -> Result<(), String> {
 // latest release's lumen.exe asset), or a direct .exe URL (used verbatim).
 // GitHub's releases/latest/download path 302-redirects to the asset; WinHTTP
 // follows the HTTPS->HTTPS redirect for us, so no API/JSON is needed.
-fn resolve_update_url(spec: &str) -> Result<String, String> {
+fn update_url(spec: &str) -> Result<String, String> {
     let s = spec.trim().trim_end_matches('/');
     if s.ends_with(".exe") {
         return Ok(s.to_string()); // direct binary URL
@@ -236,7 +236,7 @@ pub fn update() -> Result<(), String> {
                 .into(),
         );
     }
-    let url = resolve_update_url(&spec)?;
+    let url = update_url(&spec)?;
     println!("downloading compiler  <- {url}");
     let bytes = crate::http::fetch(&url)?;
     let exe = std::env::current_exe().map_err(|e| format!("cannot locate current exe: {e}"))?;
@@ -258,7 +258,7 @@ pub fn update() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_update_url;
+    use super::update_url;
 
     const LATEST: &str = "https://github.com/o/r/releases/latest/download/lumen.exe";
 
@@ -274,20 +274,20 @@ mod tests {
             "https://github.com/o/r.git",
             "  o/r  ",
         ] {
-            assert_eq!(resolve_update_url(spec).unwrap(), LATEST, "spec: {spec}");
+            assert_eq!(update_url(spec).unwrap(), LATEST, "spec: {spec}");
         }
     }
 
     #[test]
     fn resolve_direct() {
         let u = "https://example.com/builds/lumen.exe";
-        assert_eq!(resolve_update_url(u).unwrap(), u);
+        assert_eq!(update_url(u).unwrap(), u);
     }
 
     #[test]
     fn resolve_bad() {
         for spec in ["", "   ", "owner", "a/b/c", "https://github.com/owner"] {
-            assert!(resolve_update_url(spec).is_err(), "should reject: {spec:?}");
+            assert!(update_url(spec).is_err(), "should reject: {spec:?}");
         }
     }
 }
