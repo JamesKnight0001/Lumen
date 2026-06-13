@@ -1,11 +1,8 @@
-//! Native x86-64 backend (Intel syntax, Win64 ABI). Lowers the AST to assembly
-//! that must match interp.rs byte-for-byte. Values are NaN-boxed 64-bit words,
-//! but proven-int and proven-float locals get raw fast paths that skip the box.
+//! Native x86-64 backend (Intel syntax, Win64 ABI), lowering the AST to assembly
+//! that must match interp.rs byte-for-byte. Values are NaN-boxed 64-bit words;
+//! proven-int and proven-float locals get raw fast paths that skip the box.
 //! Backed by the C runtime in runtime/lumen_rt.c. The GC scans the native stack
-//! conservatively, so anything we want kept alive across a call must live in a
-//! frame slot, not just a register, at every alloc/poll point.
-//! 
-//! DO NOT TOUCH UNLESS YOU UNDRSTAND THIS FILE, THIS IS VERY IMPORTANT!
+//! conservatively, so anything kept alive across a call must live in a frame slot.
 
 use crate::ast::*;
 use crate::types::IntInfo;
@@ -56,9 +53,8 @@ struct FnCtx {
     int_loc: std::collections::HashMap<String, String>,
 }
 
-// Caller-clobbered we cannot keep, so these are the callee-saved regs/xmm we
-// borrow to keep hot loop accumulators out of memory. We save/restore them in
-// the prologue/epilogue (see gen_impl).
+// Callee-saved regs/xmm we borrow to keep hot-loop accumulators out of memory.
+// Saved/restored in the prologue/epilogue (see gen_impl).
 const XMM_POOL: [&str; 4] = ["xmm6", "xmm7", "xmm8", "xmm9"];
 
 const CALLEE_POOL: [&str; 4] = ["r12", "r13", "r14", "r15"];
@@ -106,9 +102,9 @@ impl Codegen {
         }
     }
 
-    // Cooperative GC safepoint: if the runtime has allocated enough since the
-    // last collection, call into the collector here. We only poll at points
-    // where the stack is in a scannable state (live values spilled to slots).
+    // Cooperative GC safepoint: call the collector if enough was allocated since
+    // the last collection. Only poll where the stack is scannable (live values
+    // spilled to slots).
     fn emit_poll(&mut self, out: &mut String) {
         let skip = self.new_label("gcskip");
         out.push_str("    cmp qword ptr [rip + lumen_allocs_since_gc], 512\n");
@@ -133,15 +129,15 @@ impl Codegen {
         self.label_count
     }
 
-    // Ints live in the low 48 bits of a NaN-boxed word. Sign-extend them back to
-    // a full 64-bit value by shifting up 16 and arithmetic-shifting down.
+    // Ints live in the low 48 bits of a NaN-boxed word. Sign-extend to a full
+    // 64-bit value: shift up 16, then arithmetic-shift down.
     fn emit_unbox(out: &mut String) {
 
         out.push_str("    shl rax, 16\n    sar rax, 16\n");
     }
 
-    // Re-box a raw 64-bit int: keep the low 48 bits, then OR in the int tag in
-    // the high 16. The mask drops any garbage in bits 48-63 first.
+    // Re-box a raw 64-bit int: mask to the low 48 bits (dropping garbage in
+    // 48-63), then OR in the int tag in the high 16.
     fn emit_box(out: &mut String) {
         out.push_str("    mov rcx, 0xFFFFFFFFFFFF\n    and rax, rcx\n");
         out.push_str("    mov rcx, 0x7FF9000000000000\n    or rax, rcx\n");
@@ -234,8 +230,8 @@ impl Codegen {
         let mut out = String::new();
         out.push_str("    .intel_syntax noprefix\n    .text\n    .globl main\n\n");
 
-        // Emit in source order (deterministic). Iterating self.fns (a HashMap)
-        // would randomize fn order per build, breaking reproducible output.
+        // Emit in source order: iterating self.fns (a HashMap) would randomize
+        // fn order per build and break reproducible output.
         let fns: Vec<FnDef> = prog
             .iter()
             .filter_map(|it| match it {
@@ -245,8 +241,8 @@ impl Codegen {
             .collect();
 
         // A function gets a second ".raw" entry point (unboxed Win64 ABI: ints in
-        // registers, no NaN-box) when both its params and return are proven int.
-        // Raw callers jump straight to it and skip all the box/unbox churn.
+        // registers, no NaN-box) when both params and return are proven int. Raw
+        // callers jump straight to it and skip the box/unbox churn.
         self.raw_fns = fns
             .iter()
             .filter(|f| {
@@ -473,10 +469,9 @@ impl Codegen {
     }
 
     // An int var is a safe register accumulator across a loop body when every use
-    // is either (a) an assignment `var = <expr>` whose rhs reads var only as a
-    // plain value (no escape), or (b) a read in a non-assigning statement that
-    // doesn't let it escape into an alias. Mirrors faccum_safe. The var must
-    // also be a known raw-int so its slot holds an unboxed i64.
+    // either assigns it from an rhs that reads it only as a plain value (no escape)
+    // or reads it without aliasing. Mirrors faccum_safe; var must be raw-int so its
+    // slot holds an unboxed i64.
     fn iaccum_safe(var: &str, body: &[Stmt]) -> bool {
         body.iter().all(|s| match s {
             Stmt::Assign {
@@ -539,10 +534,9 @@ impl Codegen {
         body.iter().any(|s| Self::stmt_tailcall(s, fname))
     }
 
-    // Peels a leading `if cond { return x }` guard off a raw function and emits it
-    // as a pre-prologue branch straight into registers (no frame, no spill). This
-    // is the recursion base-case fast path, e.g. fib(n) returning early for n < 2.
-    // Returns the asm plus how many body statements were consumed.
+    // Peels a leading `if cond { return x }` guard off a raw function, emitting it
+    // as a pre-prologue branch into registers (no frame/spill): the recursion
+    // base-case fast path (e.g. fib(n) for n < 2). Returns asm plus statements consumed.
     fn raw_base(&mut self, f: &FnDef, raw_abi: bool) -> Option<(String, usize)> {
         if !raw_abi {
             return None;
@@ -732,8 +726,8 @@ impl Codegen {
         raw_abi: bool,
     ) -> Result<String, String> {
 
-        // MIR numeric tier (SSA + linear-scan regalloc) is opt-in via LUMEN_MIR=1
-        // while it's proven byte-identical against the AST path (see plan S2).
+        // MIR numeric tier (SSA + linear-scan regalloc), opt-in via LUMEN_MIR=1
+        // while proven byte-identical against the AST path.
         let mir_on = std::env::var("LUMEN_MIR").as_deref() == Ok("1");
         let mut mir_body: Option<String> = None;
         if mir_on && raw_abi && crate::mir::mir_eligible(f, &self.int_info) {
@@ -878,10 +872,9 @@ impl Codegen {
             }
         }
 
-        // Self-recursive tail call: instead of recursing, we'll overwrite the
-        // param slots and jump back to a label just after the prologue. Only
-        // for plain functions (no struct_hint/method) so the frame layout is
-        // stable across iterations. Records each param's slot and rawness.
+        // Self-recursive tail call: overwrite the param slots and jump back to a
+        // label after the prologue instead of recursing. Plain functions only (no
+        // struct_hint/method) for stable frame layout. Records each slot and rawness.
         if ctx.struct_hint.is_none() && !f.is_method && Self::has_tailcall(&f.body, &f.name) {
             let label = self.new_label("tailtop");
             let tparams: Vec<(i32, bool)> = f
@@ -1072,10 +1065,9 @@ impl Codegen {
 
                             let tparams = ctx.tail_params.clone();
                             let mut tmps = Vec::with_capacity(args.len());
-                            // Evaluate all args into temps FIRST, then write them
-                            // back into the param slots. Doing it in two passes
-                            // avoids clobbering a param we still need to read
-                            // (e.g. f(b, a) swapping the two).
+                            // Evaluate all args into temps first, then write them
+                            // back into param slots: two passes avoid clobbering a
+                            // param we still need to read (e.g. f(b, a) swap).
                             for (a, (_slot, is_raw)) in args.iter().zip(tparams.iter()) {
                                 if *is_raw {
                                     self.eval_raw(a, ctx, out)?;
@@ -1142,9 +1134,9 @@ impl Codegen {
             Stmt::While { cond, body } => {
 
                 // Hoist raw-float accumulators into callee-saved xmm regs for the
-                // duration of the loop so the hot body avoids movsd spills. Only
-                // safe when the var is never read before its first write each
-                // iteration and isn't aliased; flushed back to its slot at loop end.
+                // loop so the hot body avoids movsd spills. Only safe when the var
+                // isn't read before its first write each iteration and isn't aliased;
+                // flushed back to its slot at loop end.
                 let mut promoted_active: Vec<(String, &'static str, i32)> = Vec::new();
                 {
                     let mut promoted: Vec<String> = Vec::new();
@@ -1325,13 +1317,12 @@ impl Codegen {
             }
         }
 
-        // Int accumulators: hoist a raw-int var that is read+written every iteration
-        // into a callee-saved GPR for the loop, so the body uses register arithmetic
-        // instead of load/store to its slot. Same safety discipline as floats: the
-        // var must be raw-int, not the loop var, not already register-mapped, and
-        // only ever read-as-value (iaccum_safe). Flushed back to its slot at loop
-        // exit. Callee-saved so it survives any call in the body (e.g. an index slow
-        // path). Reuses int_loc which the ident/eval_raw paths already honor.
+        // Int accumulators: hoist a raw-int var read+written every iteration into a
+        // callee-saved GPR for the loop, so the body uses register arithmetic instead
+        // of load/store to its slot. Safety (as floats): var must be raw-int, not the
+        // loop var, not already register-mapped, and only read-as-value (iaccum_safe).
+        // Flushed to its slot at loop exit. Callee-saved so it survives any call in
+        // the body (e.g. an index slow path). Reuses int_loc, honored by ident/eval_raw.
         let mut int_promoted: Vec<String> = Vec::new();
         {
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2032,10 +2023,10 @@ impl Codegen {
         }
     }
 
-    // Signed division by a compile-time constant, no idiv. Handles power-of-two
-    // divisors with a shift (plus a bias so truncation rounds toward zero, not
-    // negative infinity), and everything else via a precomputed magic multiply.
-    // Mirrors what the interpreter does so both backends agree bit-for-bit.
+    // Signed division by a compile-time constant, no idiv. Power-of-two divisors use
+    // a shift (plus a bias so truncation rounds toward zero, not negative infinity);
+    // everything else uses a precomputed magic multiply. Mirrors the interpreter so
+    // both backends agree bit-for-bit.
     fn const_div(&mut self, d: i64, out: &mut String) {
 
         if d == 1 {
@@ -3771,10 +3762,10 @@ fn escape(s: &str) -> String {
     esc
 }
 
-// Computes the magic multiplier and shift for signed division by a constant,
-// the classic Granlund-Montgomery / "Hacker's Delight" algorithm. Returns
-// (m, s) such that  n / d  ==  high64(n * m) adjusted by shift s. const_div
-// turns these into instructions; both must agree with the interpreter exactly.
+// Magic multiplier and shift for signed division by a constant (the classic
+// Granlund-Montgomery / "Hacker's Delight" algorithm). Returns (m, s) such that
+// n / d == high64(n * m) adjusted by shift s. const_div turns these into
+// instructions; both must agree with the interpreter exactly.
 fn magic_signed(d_abs: u64) -> (i64, u32) {
 
     const W: u32 = 64;
@@ -3812,9 +3803,9 @@ fn magic_signed(d_abs: u64) -> (i64, u32) {
     (m as i64, s)
 }
 
-// Tiny peephole pass: collapse "store rax to slot; reload that same slot" into a
-// single store (and a reg move if the reload targeted a different register).
-// We emit a lot of these store/reload pairs naively, so this is a cheap cleanup.
+// Peephole pass: collapse "store rax to slot; reload that same slot" into a single
+// store (plus a reg move if the reload targeted a different register). We emit many
+// such pairs naively, so this is a cheap cleanup.
 fn peephole(asm: &str) -> String {
     let lines: Vec<&str> = asm.lines().collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len());

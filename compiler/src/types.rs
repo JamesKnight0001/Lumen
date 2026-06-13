@@ -1,12 +1,8 @@
-//! Whole-program type analysis that proves which variables, params, and return
-//! values stay pure i64, pure f64, or pure list-of-f64. The native/interp fast
-//! paths use these verdicts to pick unboxed representations.
-//!
-//! Soundness model: everything starts assumed-typed and the fixpoint only ever
-//! REMOVES facts (a greatest fixpoint / "optimistic then shrink" scheme). A
-//! conservative "no" is always safe; a wrong "yes" is not. The float-list
-//! analysis is the most delicate: a bogus float-list verdict makes a backend
-//! reinterpret boxed values as raw f64 bits, silently corrupting data.
+//! Whole-program type analysis proving which variables, params, and returns
+//! stay pure i64, f64, or list-of-f64, letting backends pick unboxed reps.
+//! Soundness: facts start assumed-true and the greatest fixpoint only ever
+//! REMOVES them, so a conservative "no" is safe but a wrong "yes" is not. A bogus
+//! float-list verdict is worst: a backend would read boxed values as raw f64 bits.
 
 use crate::ast::{BinOp, Expr, FStrPart, Item, Program, Stmt, UnOp};
 use std::collections::{HashMap, HashSet};
@@ -75,8 +71,8 @@ pub fn analyze(prog: &Program) -> IntInfo {
     }
     let fn_names: HashSet<String> = fns.iter().map(|f| f.name.clone()).collect();
 
-    // Seed optimistically: assume every param and assigned var is an int, then
-    // let the fixpoint below remove any that can be disproven.
+    // Seed optimistically: assume every param and assigned var is int, then let
+    // the fixpoint below remove any that can be disproven.
     let mut int_vars: HashMap<String, HashSet<String>> = HashMap::new();
     for f in &fns {
         let mut vars: HashSet<String> = f.params.iter().cloned().collect();
@@ -84,8 +80,8 @@ pub fn analyze(prog: &Program) -> IntInfo {
         int_vars.insert(f.name.clone(), vars);
     }
 
-    // Functions reachable through a struct method: their typed-param assumption
-    // is unsound (method dispatch can pass any boxed value), so we drop it below.
+    // Functions reached via a struct method: method dispatch can pass any boxed
+    // value, so their typed-param assumption is unsound and we drop it below.
     let mut method_reached: HashSet<String> = HashSet::new();
     for item in prog {
         if let Item::Struct(s) = item {
@@ -97,8 +93,8 @@ pub fn analyze(prog: &Program) -> IntInfo {
 
     let mut int_ret: HashSet<String> = fn_names.clone();
 
-    // Same hazard for escaped functions (used as values / closures): a caller
-    // we cannot see may pass non-int args, so their params lose the int guarantee.
+    // Same hazard for escaped functions (used as values/closures): an unseen
+    // caller may pass non-int args, so their params lose the int guarantee.
     let escaped = escaped_fns(&fns, &fn_names);
     for fname in escaped.iter().chain(method_reached.iter()) {
         if let Some(set) = int_vars.get_mut(fname) {
@@ -117,10 +113,10 @@ pub fn analyze(prog: &Program) -> IntInfo {
     let params_of: HashMap<&str, &Vec<String>> =
         fns.iter().map(|f| (f.name.as_str(), &f.params)).collect();
 
-    // Int-list candidates co-evolve WITH scalar-int in the loop below, because an
-    // index into a proven int-list (a[i]) is itself an int that feeds scalar-int
-    // facts. Both are greatest-fixpoint (seed optimistic, only ever remove), so a
-    // shared loop converges soundly. Seeded here so the first round can see them.
+    // Int-list candidates co-evolve WITH scalar-int below: an index into a proven
+    // int-list (a[i]) is itself an int feeding scalar-int facts. Both are greatest
+    // fixpoints (seed optimistic, only ever remove), so a shared loop converges
+    // soundly. Seeded here so the first round can see them.
     let mut ilvars: HashMap<String, HashSet<String>> = HashMap::new();
     for f in &fns {
         let mut vars: HashSet<String> = f.params.iter().cloned().collect();
@@ -144,8 +140,8 @@ pub fn analyze(prog: &Program) -> IntInfo {
         ilist_facts.insert(f.name.clone(), flist_collect(f.body));
     }
 
-    // Int fixpoint: keep shrinking until nothing changes. Snapshots are taken at
-    // the top so every test reads a consistent state within the round.
+    // Int fixpoint: shrink until nothing changes. Snapshots taken at the top so
+    // every test reads a consistent state within the round.
     loop {
         let mut changed = false;
         let vsnap = int_vars.clone();
@@ -199,11 +195,10 @@ pub fn analyze(prog: &Program) -> IntInfo {
             }
         }
 
-        // Int-list verdict, co-evolving in this same loop. A var keeps it only if
-        // it never escapes (bad_use) and every write (assign/push/index-store) is
-        // provably int. Reads via a[i] feed the scalar-int checks above through
-        // ilsnap, closing the cycle. A wrong "yes" would let the backend read boxed
-        // words as raw i64, so this stays as strict as the float-list case.
+        // Int-list verdict, co-evolving here. A var keeps it only if it never escapes
+        // (bad_use) and every write (assign/push/index-store) is provably int. Reads
+        // via a[i] feed scalar-int above through ilsnap, closing the cycle. A wrong
+        // "yes" lets the backend read boxed words as raw i64, as unsound as float-list.
         for f in &fns {
             let facts = ilist_facts.get(&f.name).unwrap();
             let mut assigns: Vec<(String, ValSrc)> = Vec::new();
@@ -224,8 +219,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                                 ilist_ok(e, &f.name, &vsnap, &rsnap, &fn_names, &ilsnap)
                             }
                             // A `for x in lo..hi` loop var is an int scalar, not a
-                            // list; an int-list var is never sourced from IntRange
-                            // (that path builds the loop variable, not the list).
+                            // list: IntRange builds the loop variable, never the list.
                             ValSrc::IntRange | ValSrc::NonInt => false,
                         });
                 if !assigns_ok {
@@ -415,10 +409,10 @@ pub fn analyze(prog: &Program) -> IntInfo {
             }
         }
 
-        // Float-list is the strict one: a var keeps the verdict only if it is
-        // never used in a way that could leak a non-float element, and every
-        // write (assignment, push, indexed store) is provably a float. A wrong
-        // "yes" here lets a backend read boxed values as raw f64 bits.
+        // Float-list is the strict one: a var keeps the verdict only if it never
+        // leaks a non-float element and every write (assign, push, indexed store)
+        // is provably a float. A wrong "yes" lets a backend read boxed values as
+        // raw f64 bits.
         for f in &fns {
             let facts = flist_facts.get(&f.name).unwrap();
             let mut assigns: Vec<(String, ValSrc)> = Vec::new();
@@ -522,10 +516,10 @@ pub fn analyze(prog: &Program) -> IntInfo {
         }
     }
 
-    // A var proven to be an int-LIST is not a scalar int, even though the int
-    // fixpoint may have left a never-assigned list param in int_vars (params seed
-    // optimistically and only assignments disqualify). Strip them so codegen does
-    // not treat the list handle as a raw scalar when loading it for a[i].
+    // An int-LIST var is not a scalar int, yet the int fixpoint may leave a
+    // never-assigned list param in int_vars (params seed optimistically; only
+    // assignments disqualify). Strip them so codegen does not treat the list
+    // handle as a raw scalar when loading it for a[i].
     for (fname, lvars) in &ilvars {
         if let Some(ivars) = int_vars.get_mut(fname) {
             for v in lvars {
@@ -570,9 +564,8 @@ fn val_int(
 }
 
 // is_iexpr with int-list awareness: a[i] on a proven int-list var is an int.
-// The int-list verdict co-evolves with scalar-int in the same fixpoint loop, so
-// `ilist` is the in-progress ilvars snapshot. Conservative on every other
-// shape, matching the strictness the byte-identical contract requires.
+// The int-list verdict co-evolves with scalar-int in the same fixpoint, so
+// `ilist` is the in-progress ilvars snapshot. Conservative on every other shape.
 fn is_iexpr(
     e: &Expr,
     func: &str,
@@ -636,8 +629,7 @@ fn all_iret(
 }
 
 // flist_bad marks a var as "used in a way that may leak a non-float element":
-// any appearance that is not the narrow set of safe positions (indexing, len,
-// push) poisons the float-list verdict.
+// any appearance outside the safe positions (indexing, len, push) poisons it.
 fn val_float(
     src: &ValSrc,
     func: &str,
@@ -839,8 +831,7 @@ fn flist_visit(e: &Expr, facts: &mut FlistFacts) {
 
         Expr::Method { obj, name, args } => {
             // Only len/push on a bare identifier are safe receivers. push args are
-            // recorded so the verdict loop can require them to be floats; anything
-            // else escapes the list and poisons it.
+            // recorded so the verdict loop can require floats; anything else poisons it.
             let receiver_safe =
                 matches!(&**obj, Expr::Ident(_)) && (name == "len" || name == "push");
             if receiver_safe {
@@ -1114,9 +1105,8 @@ fn returns_flist(
     ok && any && matches!(body.last(), Some(Stmt::Return(_)))
 }
 
-// Int-list analogues of flist_val / returns_flist. Identical shape; the
-// element-type guarantee is enforced at the writes (is_iexpr), here we only
-// track which expressions yield an already-proven int-list.
+// Int-list analogues of flist_val / returns_flist. Element type is enforced at
+// the writes (is_iexpr); here we only track expressions yielding a proven int-list.
 fn ilist_val(
     e: &Expr,
     caller: &str,
@@ -1298,9 +1288,8 @@ fn assignments<'a>(body: &'a [Stmt], out: &mut Vec<(String, ValSrc<'a>)>) {
     }
 }
 
-// Functions whose name is used as a value (passed as an arg, captured by a
-// closure, etc.) rather than directly called. Such functions can be invoked
-// with arbitrary args we cannot see, so their typed-param assumptions are unsound.
+// Functions whose name is used as a value (arg, closure capture) not directly
+// called: callable with unseen args, so their typed-param assumptions are unsound.
 fn escaped_fns(fns: &[FnView], fn_names: &HashSet<String>) -> HashSet<String> {
     let mut escaped: HashSet<String> = HashSet::new();
     fn ve(e: &Expr, fn_names: &HashSet<String>, out: &mut HashSet<String>) {
