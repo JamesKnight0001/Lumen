@@ -28,6 +28,7 @@ pub struct LlvmGen {
     methods: HashMap<(String, String), FnDef>,
     externs: HashMap<String, ExternFn>,
     info: crate::types::IntInfo, // proven int/float verdicts for unboxing
+    arena: crate::escape::ArenaSet, // (fn, local) pairs safe to arena-allocate
 }
 
 // A local variable lives in an alloca; we load/store its i64 by name.
@@ -37,6 +38,11 @@ struct Ctx {
     loops: Vec<(String, String)>, // (continue label, break label)
     self_slot: Option<String>,
     has_try: bool, // fn contains a try -> disable unboxing (setjmp hazard)
+    // When generating a `let x = <list/map literal>` whose x is arena-eligible,
+    // this holds Some(true) so the literal emits the _arena constructor. Reset
+    // after the initializer so nested/other allocations stay on the heap.
+    arena_now: bool,
+    fn_has_arena: bool, // this fn emitted lumen_arena_mark (so rets must reset)
 }
 
 impl Default for LlvmGen {
@@ -60,6 +66,7 @@ impl LlvmGen {
             methods: HashMap::new(),
             externs: HashMap::new(),
             info: crate::types::IntInfo::default(),
+            arena: crate::escape::ArenaSet::new(),
         }
     }
 
@@ -106,6 +113,7 @@ impl LlvmGen {
 
     pub fn generate(&mut self, prog: &Program) -> Result<String, String> {
         self.info = crate::types::analyze(prog);
+        self.arena = crate::escape::analyze(prog);
         // collect decls (source order kept for determinism)
         for item in prog {
             match item {
@@ -249,6 +257,11 @@ impl LlvmGen {
             loops: Vec::new(),
             self_slot: None,
             has_try: body_has_try(&f.body),
+            arena_now: false,
+            // arena only if this fn has at least one eligible local AND no try
+            // (an exception unwinds past our ret-time reset; v1 plays safe).
+            fn_has_arena: !body_has_try(&f.body)
+                && self.arena.iter().any(|(fname, _)| fname == &f.name),
         };
 
         // signature: i64 (i64 %a0, ...). `self` is already a regular param named
@@ -273,6 +286,15 @@ impl LlvmGen {
         let _ = writeln!(b, "define i64 @{sym}({sig}) {{");
         b.push_str("entry:\n");
         b.push_str(&prologue);
+        // Arena frame: mark on entry, reset before every ret. The token lives in
+        // a fixed alloca so all rets can load it.
+        if ctx.fn_has_arena {
+            self.need("lumen_arena_mark", "i64 @lumen_arena_mark()");
+            self.need("lumen_arena_reset", "void @lumen_arena_reset(i64)");
+            b.push_str("  %arena.tok = alloca i64\n");
+            b.push_str("  %arena.m = call i64 @lumen_arena_mark()\n");
+            b.push_str("  store i64 %arena.m, ptr %arena.tok\n");
+        }
 
         let mut bodytext = String::new();
         let mut terminated = false;
@@ -315,6 +337,10 @@ impl LlvmGen {
             self.need("lumen_nil", "i64 @lumen_nil()");
             let n = self.vreg();
             let _ = writeln!(b, "  {n} = call i64 @lumen_nil()");
+            if ctx.fn_has_arena {
+                b.push_str("  %arena.r0 = load i64, ptr %arena.tok\n");
+                b.push_str("  call void @lumen_arena_reset(i64 %arena.r0)\n");
+            }
             let _ = writeln!(b, "  ret i64 {n}");
         }
         b.push_str("}\n\n");
@@ -349,7 +375,13 @@ impl LlvmGen {
                 }
             }
             Stmt::Let { name, value, .. } => {
+                // If this local is arena-eligible, flag the upcoming literal so it
+                // emits the _arena constructor. Reset right after the initializer.
+                let was = ctx.arena_now;
+                ctx.arena_now =
+                    ctx.fn_has_arena && self.arena.contains(&(ctx.func.clone(), name.clone()));
                 let v = self.gen_expr(value, ctx, out)?;
+                ctx.arena_now = was;
                 let slot = match ctx.locals.get(name) {
                     Some(s) => s.clone(),
                     None => {
@@ -378,6 +410,13 @@ impl LlvmGen {
                         n
                     }
                 };
+                // free this frame's arena objects before returning. Safe: escape
+                // analysis guarantees no arena local is the returned value.
+                if ctx.fn_has_arena {
+                    let t = self.vreg();
+                    let _ = writeln!(out, "  {t} = load i64, ptr %arena.tok");
+                    let _ = writeln!(out, "  call void @lumen_arena_reset(i64 {t})");
+                }
                 let _ = writeln!(out, "  ret i64 {v}");
                 *term = true;
             }
@@ -981,10 +1020,16 @@ impl LlvmGen {
                 Ok(r)
             }
             Expr::List(xs) => {
-                self.need("lumen_list_new", "i64 @lumen_list_new(i64)");
+                // arena-allocate when this is the initializer of a non-escaping
+                // local. Clear arena_now first so element sub-expressions (which
+                // may themselves allocate) stay on the heap.
+                let arena = ctx.arena_now;
+                ctx.arena_now = false;
+                let ctor = if arena { "lumen_list_new_arena" } else { "lumen_list_new" };
+                self.need(ctor, &format!("i64 @{ctor}(i64)"));
                 self.need("lumen_list_push", "void @lumen_list_push(i64, i64)");
                 let lst = self.vreg();
-                let _ = writeln!(out, "  {lst} = call i64 @lumen_list_new(i64 {})", xs.len());
+                let _ = writeln!(out, "  {lst} = call i64 @{ctor}(i64 {})", xs.len());
                 let lslot = self.vreg();
                 let _ = writeln!(out, "  {lslot} = alloca i64");
                 let _ = writeln!(out, "  store i64 {lst}, ptr {lslot}");
@@ -999,10 +1044,13 @@ impl LlvmGen {
                 Ok(r)
             }
             Expr::Map(kvs) => {
-                self.need("lumen_map_new", "i64 @lumen_map_new()");
+                let arena = ctx.arena_now;
+                ctx.arena_now = false;
+                let ctor = if arena { "lumen_map_new_arena" } else { "lumen_map_new" };
+                self.need(ctor, &format!("i64 @{ctor}()"));
                 self.need("lumen_map_set", "void @lumen_map_set(i64, i64, i64)");
                 let m = self.vreg();
-                let _ = writeln!(out, "  {m} = call i64 @lumen_map_new()");
+                let _ = writeln!(out, "  {m} = call i64 @{ctor}()");
                 let mslot = self.vreg();
                 let _ = writeln!(out, "  {mslot} = alloca i64");
                 let _ = writeln!(out, "  store i64 {m}, ptr {mslot}");

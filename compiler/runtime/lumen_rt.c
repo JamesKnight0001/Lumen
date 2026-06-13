@@ -189,6 +189,8 @@ void lumen_set_line(uint32_t n) { lumen_current_line = n; }
 typedef struct { void *slot[8]; } LumenJmp;
 static LumenJmp lumen_try_stack[LUMEN_TRY_MAX];
 static int lumen_try_depth = 0;
+static int lumen_try_arena[LUMEN_TRY_MAX]; // arena frame depth at each try entry
+static int arena_depth;                    // current arena frame depth (defined below)
 static char lumen_err_buf[512];
 
 LumenVal lumen_str_new(const char *cstr);
@@ -244,11 +246,20 @@ __attribute__((naked, noinline, noreturn)) void lumen_longjmp(LumenJmp *buf __at
 
 LumenJmp *lumen_try_push(void) {
     if (lumen_try_depth >= LUMEN_TRY_MAX) return NULL;
+    lumen_try_arena[lumen_try_depth] = arena_depth; // remember arena frame for unwind
     return &lumen_try_stack[lumen_try_depth++];
 }
 
 void lumen_try_pop(void) {
     if (lumen_try_depth > 0) lumen_try_depth--;
+}
+
+// On a caught exception the stack unwinds via longjmp, skipping the normal
+// lumen_arena_reset at each intervening function's return. Roll the arena back
+// to where the catching try began so those frames' objects are bulk-freed.
+void lumen_try_unwind_arena(void) {
+    extern void lumen_arena_reset(int64_t);
+    lumen_arena_reset((int64_t)lumen_try_arena[lumen_try_depth]);
 }
 
 LumenVal lumen_caught_msg(void) { return lumen_str_new(lumen_err_buf); }
@@ -382,6 +393,110 @@ static void gc_register(void *o) {
     gc_set_add(o);
 }
 
+// ───────────────────────── arena (escape-analysis allocations) ─────────────
+// Objects the compiler proved cannot escape their function are bump-allocated
+// here instead of on the GC heap, and freed wholesale when the function returns
+// (or unwinds). They are NEVER gc_register'd, so the sweep never frees them
+// individually; the collector instead treats every live arena object's direct
+// referents as roots (arena_mark_roots) so heap objects they uniquely hold stay
+// alive across a mid-function collection. Arena chunks never move, so pointers
+// into them stay valid for the object's whole (scope-bounded) lifetime.
+#define ARENA_CHUNK (64 * 1024)
+#define ARENA_RC (-1)   // sentinel rc marking an arena (non-GC) object
+static void gc_mark_val(LumenVal v); // defined with the GC, used by arena roots
+typedef struct ArenaChunk { struct ArenaChunk *next; size_t used, cap; char *base; } ArenaChunk;
+static ArenaChunk *arena_head = NULL;   // current chunk
+static void **arena_objs = NULL;        // every live arena object pointer
+static size_t arena_objs_len = 0, arena_objs_cap = 0;
+static int arena_enabled = 1;
+
+// A frame remembers where the arena was when a function entered, so reset frees
+// exactly what that function (and its callees that already returned) allocated.
+typedef struct { ArenaChunk *chunk; size_t used; size_t objs_len; } ArenaFrame;
+static ArenaFrame arena_frames[4096];
+static int arena_depth = 0;
+
+static ArenaChunk *arena_new_chunk(size_t need) {
+    size_t cap = need > ARENA_CHUNK ? need : ARENA_CHUNK;
+    ArenaChunk *c = malloc(sizeof(ArenaChunk));
+    if (!c) { fprintf(stderr, "lumen: arena oom\n"); exit(1); }
+    c->base = malloc(cap);
+    if (!c->base) { fprintf(stderr, "lumen: arena oom\n"); exit(1); }
+    c->used = 0; c->cap = cap; c->next = arena_head;
+    arena_head = c;
+    return c;
+}
+
+static void *arena_alloc(size_t n) {
+    n = (n + 15) & ~(size_t)15;                 // 16-byte align
+    if (!arena_head || arena_head->used + n > arena_head->cap) arena_new_chunk(n);
+    void *p = arena_head->base + arena_head->used;
+    arena_head->used += n;
+    memset(p, 0, n);                            // GC reads kind/mark; zero like calloc
+    return p;
+}
+
+static void arena_track(void *o) {
+    if (arena_objs_len == arena_objs_cap) {
+        arena_objs_cap = arena_objs_cap ? arena_objs_cap * 2 : 256;
+        arena_objs = realloc(arena_objs, arena_objs_cap * sizeof(void *));
+        if (!arena_objs) { fprintf(stderr, "lumen: arena oom\n"); exit(1); }
+    }
+    arena_objs[arena_objs_len++] = o;
+}
+
+// Is p inside any live arena chunk? Used to (a) skip arena objects in the heap
+// sweep/release and (b) route in-place growth to the arena.
+static int arena_in(void *p) {
+    for (ArenaChunk *c = arena_head; c; c = c->next)
+        if ((char *)p >= c->base && (char *)p < c->base + c->used) return 1;
+    return 0;
+}
+
+// Save the arena position on function entry. Returns a frame depth token.
+int64_t lumen_arena_mark(void) {
+    if (!arena_enabled || arena_depth >= 4095) return -1;
+    ArenaFrame *f = &arena_frames[arena_depth];
+    f->chunk = arena_head;
+    f->used = arena_head ? arena_head->used : 0;
+    f->objs_len = arena_objs_len;
+    return arena_depth++;
+}
+
+// Free everything allocated since the matching mark. Frees whole chunks newer
+// than the marked one and rewinds the bump pointer + object list.
+void lumen_arena_reset(int64_t tok) {
+    if (tok < 0) return;
+    arena_depth = (int)tok;                     // pop this frame and any leaked above it
+    ArenaFrame *f = &arena_frames[tok];
+    while (arena_head && arena_head != f->chunk) {
+        ArenaChunk *c = arena_head; arena_head = c->next;
+        free(c->base); free(c);
+    }
+    if (arena_head) arena_head->used = f->used;
+    arena_objs_len = f->objs_len;
+}
+
+// Mark phase hook: every live arena object's direct referents are roots, so the
+// heap objects an arena object uniquely holds survive a mid-function collection.
+// We do NOT recurse into arena objects here (they aren't gc_objects); iterating
+// the full arena_objs list covers arena->arena->heap chains, and gc_mark_val
+// already skips non-heap pointers, so this is cycle-safe.
+static void arena_mark_roots(void) {
+    for (size_t i = 0; i < arena_objs_len; i++) {
+        LumenObj *o = (LumenObj *)arena_objs[i];
+        switch (o->kind) {
+            case OBJ_LIST: { LumenList *l = (LumenList *)o;
+                for (size_t k = 0; k < l->len; k++) gc_mark_val(l->items[k]); break; }
+            case OBJ_MAP: { LumenMap *m = (LumenMap *)o;
+                for (size_t k = 0; k < m->len; k++) { gc_mark_val(m->keys[k]); gc_mark_val(m->vals[k]); } break; }
+            case OBJ_STRUCT: { LumenStruct *s = (LumenStruct *)o;
+                for (size_t k = 0; k < s->nfields; k++) gc_mark_val(s->field_vals[k]); break; }
+            default: break;
+        }
+    }
+}
+
 static int gc_is_object(void *p) {
     if (!gc_set_cap) return 0;
     size_t mask = gc_set_cap - 1;
@@ -490,6 +605,7 @@ void lumen_gc_collect(void) {
     for (size_t i = 0; i < gc_count; i++) ((LumenObj *)gc_objects[i])->gc_mark = 0;
 
     gc_scan_range(lo, hi);
+    arena_mark_roots(); // keep heap objects that only an arena object references
 
     if (major) {
         // Sweep the entire object array, compacting survivors down. Everything
@@ -530,6 +646,7 @@ void lumen_gc_init(void *stack_bottom) {
     const char *e = getenv("LUMEN_GC");
     if (e && e[0] == '1') atexit(lumen_gc_report);
     if (e && e[0] == '0') gc_enabled = 0; // LUMEN_GC=0 disables collection (diag)
+    if (getenv("LUMEN_NO_ARENA")) arena_enabled = 0; // force all allocs to the heap (diag)
 }
 
 void lumen_release(LumenVal v);
@@ -543,6 +660,7 @@ void lumen_retain(LumenVal v) {
 void lumen_release(LumenVal v) {
     if (!lumen_is_ptr(v)) return;
     LumenObj *o = (LumenObj *)unbox_ptr(v);
+    if (o->rc == ARENA_RC) return; // arena objects are freed by frame reset, never here
     if (--o->rc > 0) return;
     switch (o->kind) {
         case OBJ_STR:
@@ -613,12 +731,34 @@ LumenVal lumen_list_new(int64_t n) {
     l->items = xalloc(l->cap * sizeof(LumenVal));
     return box_ptr(l);
 }
+// Arena variant: same layout, bump-allocated, not GC-tracked. Its items buffer
+// also lives in the arena. rc is set to ARENA_RC (-1) to flag an arena object so
+// list_push / map_set grow via the arena instead of heap realloc. cap stays a
+// plain capacity (no readers elsewhere need adjusting).
+LumenVal lumen_list_new_arena(int64_t n) {
+    if (!arena_enabled) return lumen_list_new(n);
+    LumenList *l = arena_alloc(sizeof(LumenList));
+    arena_track(l);
+    l->kind = OBJ_LIST;
+    l->rc = ARENA_RC;
+    l->len = 0;
+    l->cap = n > 0 ? (size_t)n : 4;
+    l->items = arena_alloc(l->cap * sizeof(LumenVal));
+    return box_ptr(l);
+}
 void lumen_list_push(LumenVal lst, LumenVal v) {
     LumenList *l = unbox_ptr(lst);
     if (l->len == l->cap) {
-        l->cap *= 2;
-        l->items = realloc(l->items, l->cap * sizeof(LumenVal));
-        if (!l->items) { fprintf(stderr, "lumen: oom\n"); exit(1); }
+        size_t ncap = l->cap * 2;
+        if (l->rc == ARENA_RC) {
+            LumenVal *ni = arena_alloc(ncap * sizeof(LumenVal));
+            memcpy(ni, l->items, l->len * sizeof(LumenVal));
+            l->items = ni;
+        } else {
+            l->items = realloc(l->items, ncap * sizeof(LumenVal));
+            if (!l->items) { fprintf(stderr, "lumen: oom\n"); exit(1); }
+        }
+        l->cap = ncap;
     }
     l->items[l->len++] = v;
 }
@@ -651,6 +791,22 @@ LumenVal lumen_struct_new(const char *name, int64_t nfields, const char **field_
     s->nfields = (size_t)nfields;
     s->field_names = field_names;
     s->field_vals = xalloc((nfields ? nfields : 1) * sizeof(LumenVal));
+    for (int64_t i = 0; i < nfields; i++) s->field_vals[i] = lumen_nil();
+    return box_ptr(s);
+}
+// Arena variant: struct + field_vals bump-allocated, not GC-tracked. field_names
+// points at the same immortal rodata table the heap ctor uses. Structs never
+// grow, so no arena-aware mutation path is needed.
+LumenVal lumen_struct_new_arena(const char *name, int64_t nfields, const char **field_names) {
+    if (!arena_enabled) return lumen_struct_new(name, nfields, field_names);
+    LumenStruct *s = arena_alloc(sizeof(LumenStruct));
+    arena_track(s);
+    s->kind = OBJ_STRUCT;
+    s->rc = ARENA_RC;
+    s->name = name;
+    s->nfields = (size_t)nfields;
+    s->field_names = field_names;
+    s->field_vals = arena_alloc((nfields ? nfields : 1) * sizeof(LumenVal));
     for (int64_t i = 0; i < nfields; i++) s->field_vals[i] = lumen_nil();
     return box_ptr(s);
 }
@@ -2432,6 +2588,21 @@ LumenVal lumen_map_new(void) {
     m->idx = xalloc(m->idx_cap * sizeof(size_t));
     return box_ptr(m);
 }
+// Arena variant: all buffers bump-allocated, not GC-tracked, freed by frame reset.
+LumenVal lumen_map_new_arena(void) {
+    if (!arena_enabled) return lumen_map_new();
+    LumenMap *m = arena_alloc(sizeof(LumenMap));
+    arena_track(m);
+    m->kind = OBJ_MAP;
+    m->rc = ARENA_RC;
+    m->len = 0;
+    m->cap = 4;
+    m->keys = arena_alloc(m->cap * sizeof(LumenVal));
+    m->vals = arena_alloc(m->cap * sizeof(LumenVal));
+    m->idx_cap = 8;
+    m->idx = arena_alloc(m->idx_cap * sizeof(size_t));
+    return box_ptr(m);
+}
 
 static LumenMap *as_map(LumenVal v) {
     if (obj_kind_of(v) == OBJ_MAP) return (LumenMap *)unbox_ptr(v);
@@ -2446,8 +2617,14 @@ static void map_idx_put(LumenMap *m, size_t slot) {
 }
 
 static void map_idx_rebuild(LumenMap *m, size_t want) {
+    size_t old = m->idx_cap;
     while (m->idx_cap < want * 2) m->idx_cap *= 2;
-    m->idx = realloc(m->idx, m->idx_cap * sizeof(size_t));
+    if (m->rc == ARENA_RC) {
+        m->idx = arena_alloc(m->idx_cap * sizeof(size_t)); // old block wasted, fine
+    } else {
+        m->idx = realloc(m->idx, m->idx_cap * sizeof(size_t));
+    }
+    (void)old;
     memset(m->idx, 0, m->idx_cap * sizeof(size_t));
     for (size_t s = 0; s < m->len; s++) map_idx_put(m, s);
 }
@@ -2469,9 +2646,18 @@ void lumen_map_set(LumenVal mv, LumenVal key, LumenVal val) {
     ptrdiff_t found = map_find(m, key);
     if (found >= 0) { m->vals[found] = val; return; }
     if (m->len == m->cap) {
-        m->cap *= 2;
-        m->keys = realloc(m->keys, m->cap * sizeof(LumenVal));
-        m->vals = realloc(m->vals, m->cap * sizeof(LumenVal));
+        size_t ncap = m->cap * 2;
+        if (m->rc == ARENA_RC) {
+            LumenVal *nk = arena_alloc(ncap * sizeof(LumenVal));
+            LumenVal *nv = arena_alloc(ncap * sizeof(LumenVal));
+            memcpy(nk, m->keys, m->len * sizeof(LumenVal));
+            memcpy(nv, m->vals, m->len * sizeof(LumenVal));
+            m->keys = nk; m->vals = nv;
+        } else {
+            m->keys = realloc(m->keys, ncap * sizeof(LumenVal));
+            m->vals = realloc(m->vals, ncap * sizeof(LumenVal));
+        }
+        m->cap = ncap;
     }
     size_t slot = m->len;
     m->keys[slot] = key;

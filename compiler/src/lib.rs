@@ -10,6 +10,7 @@ pub mod builtins;
 pub mod codegen;
 pub mod defaults;
 pub mod desugar;
+pub mod escape;
 #[cfg(windows)]
 pub mod ffi;
 pub mod http;
