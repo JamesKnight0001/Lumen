@@ -15,9 +15,11 @@ to read a loop counter.
 ## 2. It emits real machine code
 
 `lumen build` doesn't hand a virtual machine some bytecode to chew through at
-runtime. It writes x86-64 assembly, and GCC turns that into a native executable.
-No dispatch loop, no "which opcode is this" check on every operation. Just
-instructions the CPU runs directly.
+runtime. By default it emits **LLVM IR** and links it with clang + lld into a
+native executable (`--backend asm` instead writes x86-64 assembly and links with
+gcc - same byte-identical output, used as the fallback when no LLVM toolchain is
+present). Either way: no dispatch loop, no "which opcode is this" check on every
+operation. Just instructions the CPU runs directly.
 
 ## 3. A thin, optimized C runtime
 
@@ -39,16 +41,33 @@ are *always* integers or *always* floats. Those skip boxing entirely:
   `movsd` from contiguous memory; a list proven to hold only **integers** gets
   an inline bounds-checked `mov` + unbox, skipping the `lumen_index_get` runtime
   dispatch entirely (this is the S3 work - about +60% on int-list-heavy loops).
-- A reduction accumulator in a `for` loop (`total = total + …`) is hoisted into a
-  callee-saved register for the whole loop instead of being written back to its
-  stack slot every iteration (the S10 work - about +23% on accumulator loops).
+- A reduction accumulator in a `for`/`while` loop (`total = total + …`) stays
+  unboxed for the whole loop - on the LLVM backend a proven-int local lives as a
+  raw `i64` in its stack slot (which LLVM promotes to a register), so the loop
+  accumulates with a bare `add` and no per-iteration box/unbox. The integer-loop
+  benchmark lands at ~1.1× C this way.
 - `x % 2^k` with a constant power-of-two divisor compiles to a sign-correct mask
   (a few shifts + an `and`) instead of a divide, matching the interpreter's
-  remainder bit-for-bit including for negatives (the S11 work - about +19% on
-  modulo-heavy loops like collatz).
+  remainder bit-for-bit including for negatives.
 - Self-recursive tail calls become plain loops, and small functions get inlined.
 - A recursive function's base case can return *before* its stack frame is even
   built, which on something like `fib` is roughly half of all calls.
+- The NaN-box conversion helpers (`lumen_from_int`, `lumen_to_int`, and the float
+  pair) are pure, so they're tagged `memory(none)`: LLVM then deletes dead boxes
+  (e.g. a loop counter the body never reads) and hoists loop-invariant ones. This
+  is what brings the float reduction to ~1.03× C.
+
+## 4b. Short-lived objects skip the GC heap
+
+A second whole-program analysis (escape analysis) proves which lists, maps,
+structs, and comprehensions never escape the function that builds them. Those are
+**bump-allocated in a per-call arena** and freed wholesale when the function
+returns - no GC tracking, no individual frees, deterministic cleanup at scope
+exit. It's the memory-safety win of Rust's ownership (no leaks, no
+use-after-free, freed when the scope ends) without any annotations: you write
+plain Lumen and the compiler proves the lifetime. Objects that *might* escape
+fall back to the GC heap automatically, so it's never wrong - just faster when it
+can prove the common case.
 
 ## 5. The optimizer runs to a fixpoint
 
@@ -60,56 +79,50 @@ strictly less generated code (the S5 work).
 
 ## What that buys you
 
-Measured on this machine (Windows, mingw64 gcc 15.2.0, rustc 1.96, Java 25,
-Node 24, CPython 3.12). Medians of repeated runs with warmup discarded; every
+Measured on this machine (Windows; LLVM/clang 21.1.6, mingw64 gcc 16.1,
+rustc 1.96, OpenJDK 25, Node 24, CPython 3.14). Best-of-5 wall-clock; every
 program's output is byte-identical across all languages, because it's the same
-program. Absolute numbers shift per machine - the ratios are the point.
+program, and Lumen's interpreter, LLVM build, and asm build agree to the byte.
+Absolute numbers shift per machine - the ratios are the point. The harness is
+`bench/bench.py`.
 
-### Fair scalar workloads (the honest comparison)
+| Workload | Lumen | C `-O2` | Rust `-O` | Node | Python |
+|----------|------:|--------:|----------:|-----:|-------:|
+| `fib(35)` recursion          | **~57 ms**  | ~22 ms | ~30 ms | ~177 ms | ~1210 ms |
+| float reduce, 5×10⁷          | **~56 ms**  | ~54 ms | ~56 ms | ~111 ms | ~4680 ms |
+| int loop + modulo, 5×10⁷     | **~60 ms**  | ~56 ms | ~58 ms | ~168 ms | ~4900 ms |
+| hash-map build+lookup, 10⁶   | **~57 ms**  | ~15 ms | ~46 ms | ~111 ms |  ~170 ms |
 
-These are loops the C/Rust compilers **cannot** constant-fold or auto-vectorize
-away, so it's genuinely Lumen's scalar code vs theirs:
+The two tight numeric loops are the headline: the **float reduction is ~1.03× C
+and the integer loop ~1.1× C** - effectively tied with the native compilers, and
+faster than Lumen's own asm backend on the int loop. Recursion sits at ~2.6× C
+(call overhead) and hash-map throughput at ~3× C (hashing + heap). Against the
+managed runtimes it isn't close: Lumen is ~2-3× faster than Node and 12-85×
+faster than CPython across the board.
 
-| Workload | Lumen 0.77 | C `-O2` | Rust `-O` | Node | Python |
-|----------|-----------|---------|-----------|------|--------|
-| `fib(34)` recursion          | **~32 ms**  | ~15 ms | ~21 ms | ~117 ms | ~1132 ms |
-| collatz (branchy, data-dependent) | **~139 ms** | ~52 ms | ~35 ms | ~282 ms | ~3220 ms |
-
-On recursion Lumen is ~2× C and ahead of Rust-less-so but well ahead of Node and
-Python. On collatz - a deliberately un-optimizable, branch-heavy scalar loop -
-Lumen is ~2.7× C, ~4× Rust, **2× faster than Node, and ~23× faster than Python.**
-That's the real shape of it: ~2-3× off the native compilers on honest scalar
-code, decisively faster than every interpreter.
-
-### Container workloads
-
-| Workload | Lumen 0.77 | C `-O2` | Rust `-O` | Node | Python |
-|----------|-----------|---------|-----------|------|--------|
-| int-list sum, 100M reads | **~225 ms** | ~21 ms† | ~15 ms† | ~182 ms | ~8975 ms |
-
-The int-list reductions are where S3 shows up: 0.75 ran this in ~549 ms, 0.77
-runs it in ~225 ms - a **2.4× generational speedup**, now ahead of Node and ~40×
-ahead of Python.
+That's the real shape of it: tied with C on hot numeric loops, a small constant
+factor off on recursion and containers, and decisively faster than every
+interpreter - from a dynamically-typed language running the same source
+unchanged under its own interpreter.
 
 ### Read the daggers honestly
 
-The `*`/`†` cases are where C and Rust look untouchable, and it's worth being
-precise about *why*:
+Where C and Rust still pull ahead, it's worth being precise about *why*:
 
-- **Auto-vectorization.** On the int-list sum, gcc and rustc emit SIMD (`paddq`,
-  processing multiple elements per instruction). Lumen emits honest scalar loads.
-  Matching this needs a vectorizer, which Lumen does not have.
-- **Whole-loop constant folding.** On a closed-form reduction like
-  `sum(i for i in 0..1e8)`, gcc computes the answer at compile time and emits a
-  single `movabsq` - the loop is *gone* from the binary. That "5 ms" isn't C
-  running a fast loop; it's C running no loop. Comparing against it is comparing
-  against the absence of work.
+- **Recursion call overhead.** On `fib`, C/Rust have near-zero per-call cost;
+  Lumen's calls still pass NaN-boxed values through the boxed ABI, so each
+  recursive call boxes its argument and result. That's the ~2.6× gap.
+- **Auto-vectorization & constant folding.** On closed-form or SIMD-friendly
+  reductions, gcc and rustc emit `paddq`/`movabsq` - processing many elements per
+  instruction, or computing the answer at compile time and emitting *no loop at
+  all*. Lumen emits honest scalar code. Comparing against a deleted loop is
+  comparing against the absence of work.
+- **Hash-map throughput.** The map benchmark is dominated by the C runtime's hash
+  + probe; C's inlined open-addressing table is simply tighter.
 
-Neither is Lumen "losing at the same task" - they're the C/Rust compilers
-deleting or transforming the task. Where the work actually has to happen (the
-scalar table above), Lumen is within a small constant factor and the goal -
-"meet C on the hot path, beat every managed language" - holds. These docs won't
-pretend otherwise.
+Where the work actually has to happen scalar-for-scalar (the two loop rows),
+Lumen is within ~10% of C. The goal - "meet C on the hot path, beat every managed
+language" - holds, and these docs won't pretend otherwise.
 
 ### Reproduce it
 

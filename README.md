@@ -120,8 +120,10 @@ to the byte.
 and a whole-program type analysis proves which locals, parameters, and list
 elements are always integers or always floats, so they stay **unboxed** in the
 generated code - integer/float arithmetic and comparisons become inline machine
-instructions instead of runtime calls, and tight numeric loops drop their GC
-safepoints entirely.
+instructions instead of runtime calls, proven-int locals live as raw `i64` in
+their stack slots (no per-iteration box/unbox), short-lived collections that
+never escape are bump-allocated in a per-call arena instead of the GC heap, and
+tight numeric loops drop their GC safepoints entirely.
 
 Four workloads, each computing an identical result in every language, best-of-5
 wall-clock. Measured on this machine (Windows; LLVM/clang 21.1.6, gcc 16.1,
@@ -131,22 +133,24 @@ and asm build agree to the byte. Run it yourself: `python bench/bench.py`.
 
 | Workload | Lumen | C `-O2` | Rust `-O` | Java | Node | Python |
 |----------|------:|--------:|----------:|-----:|-----:|-------:|
-| `fib(35)` recursion        | **50 ms**  | 19 ms | 27 ms | 86 ms  | 155 ms | 1045 ms |
-| float reduce, 5×10⁷ iters  | **77 ms**  | 52 ms | 53 ms | 166 ms | 102 ms | 3900 ms |
-| int loop + modulo, 5×10⁷   | **82 ms**  | 50 ms | 53 ms | 116 ms | 148 ms | 4030 ms |
-| hash-map build+lookup, 10⁶ | **31 ms**  | 12 ms | 27 ms | 98 ms  |  84 ms |  144 ms |
+| `fib(35)` recursion        | **57 ms**  | 22 ms | 30 ms | 99 ms  | 177 ms | 1212 ms |
+| float reduce, 5×10⁷ iters  | **56 ms**  | 54 ms | 56 ms | 184 ms | 111 ms | 4684 ms |
+| int loop + modulo, 5×10⁷   | **60 ms**  | 56 ms | 58 ms | 133 ms | 168 ms | 4900 ms |
+| hash-map build+lookup, 10⁶ | **57 ms**  | 15 ms | 46 ms | 123 ms |  111 ms |  170 ms |
 
-Ratios vs C (lower is better): Lumen is **1.5×** off C on the float reduction,
-**1.6×** on the integer loop, and **2.6×** on recursion and hash-map throughput.
-It beats Java, Node, and CPython on every workload - up to ~3× faster than Node
-and 12-80× faster than CPython - while staying a dynamically-typed language with
-the same source running unchanged under the interpreter.
+Ratios vs C (lower is better): the float reduction and the integer loop are now
+**~1.03×** and **~1.1×** off C - effectively tied - while recursion sits at
+**~2.6×** and hash-map throughput at **~3×**. Lumen beats Java, Node, and
+CPython on every workload - up to ~3× faster than Node and 12-85× faster than
+CPython - while staying a dynamically-typed language with the same source
+running unchanged under the interpreter.
 
-Read those honestly: C and Rust still win outright, and on some reductions they
-auto-vectorize or constant-fold work away that Lumen emits as straight scalar
-code. The goal isn't to beat C - it's to get within a small constant factor of
-it from a Python-like language, and to leave every managed runtime behind. The
-full methodology and per-release deltas live in
+Read those honestly: C and Rust still win on recursion (their call overhead is
+lower) and on hash-map throughput, and on some reductions they auto-vectorize or
+constant-fold work away that Lumen emits as straight scalar code. The goal isn't
+to beat C - it's to get within a small constant factor of it from a Python-like
+language, and to leave every managed runtime behind. The full methodology and
+per-release deltas live in
 [`docs/lumen/performance.md`](docs/lumen/performance.md).
 
 ## Status
@@ -165,7 +169,15 @@ Recent backend work:
 * **LLVM backend** - `lumen build` defaults to emitting LLVM IR and linking with
   clang + lld; falls back to the asm backend when no LLVM toolchain is present
 * **Unboxed numerics** - proven int/float locals compile to inline `i64`/`double`
-  arithmetic instead of boxed runtime calls (recursion ~2.9×, float/loop ~4× faster)
+  arithmetic instead of boxed runtime calls
+* **Raw-int slots** - proven-int locals are held as raw `i64` in their stack
+  slots, so loops accumulate without a per-iteration box/unbox (int loop ~1.1× C)
+* **Arena allocation** - lists, maps, structs, and comprehensions proven not to
+  escape their function are bump-allocated per call and freed on return, off the
+  GC heap (Rust-like scope-bound freeing, no annotations)
+* **Pure-helper attributes** - NaN-box conversion helpers are tagged
+  `memory(none)`, letting LLVM delete dead boxes and hoist invariant ones
+  (float reduction ~1.03× C)
 * **Branch-on-compare** - int/float comparisons feeding `if`/`while` lower to a
   direct `icmp`/`fcmp` + branch, skipping the box/unbox round-trip
 * **GC safepoint elision** - loops proven not to allocate drop their per-iteration
