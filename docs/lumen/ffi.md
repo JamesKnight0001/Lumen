@@ -1,18 +1,16 @@
 # Calling C libraries and DLLs (FFI)
 
-Lumen can reach outside itself and call C-ABI functions in any shared library:
-a `.dll` on Windows, the system C library, your own compiled C. This is how a
-small language does big things: play sounds, open windows, draw with the
-GPU, talk to the OS. On Windows it scales all the way up to **COM and
-DirectX**.
+Lumen calls C-ABI functions in any shared library: a `.dll` on Windows, the
+system C library, your own compiled C. That's how a small language does big
+things: play sounds, open windows, draw with the GPU, talk to the OS. On Windows
+it reaches **COM and DirectX**.
 
-This page is the conceptual tour. For the exact `cffi` calls, see
+A conceptual tour. For exact `cffi` calls, see
 [the stdlib reference](../syntax/stdlib.md#the-cffi-module).
 
 ## The simplest case: a flat function
 
-Declare what you're calling in an `extern` block, then call it like any
-Lumen function:
+Declare it in an `extern` block, then call it like any Lumen function:
 
 ```lumen
 extern "C" from "kernel32.dll":
@@ -39,31 +37,31 @@ Each parameter's declared type decides how it's passed to C:
 | `-> nil` | the return value is ignored |
 
 So float math and graphics APIs work directly, `sqrt(2.0)`, `pow(2.0, 10.0)`,
-and you can mix int and float arguments freely. The native backend takes up to
+mixing int and float arguments freely. The native backend takes up to
 **16 arguments** (enough for `CreateWindowExA`'s twelve); the interpreter handles
-up to four, so for wide-signature calls you build the program.
+up to four, so wide-signature calls need a build.
 
 ## Four building blocks, and what they unlock
 
-As you move from "call a function" to "drive DirectX," the FFI gives you four
-primitives, each layering on the last. They live in the `cffi` module.
+From "call a function" to "drive DirectX," the FFI gives four primitives, each
+layering on the last, in the `cffi` module.
 
-1. **C buffers**: `cffi.cbuf(n)` makes a raw byte blob, and `set_*/get_*` read
-   and write typed fields at byte offsets. This is how you build a C **struct**
-   to pass by pointer, and how you receive data from an **out-parameter** (the
-   "give me a pointer and I'll fill it in" idiom every Win32 and COM API uses).
+1. **C buffers**: `cffi.cbuf(n)` makes a raw byte blob; `set_*/get_*` read and
+   write typed fields at byte offsets. This is how you build a C **struct** to
+   pass by pointer, and how you receive an **out-parameter** (the out-pointer
+   idiom every Win32 and COM API uses).
 
-2. **COM method calls**: `cffi.vcall(obj, slot, args, ret_kind)` calls a method
-   on a COM object through its vtable. COM isn't flat functions; it's objects
-   whose methods you call by *slot number*. This drives DirectX, Media
-   Foundation, WIC, the Windows shell, audio, anything object-based on Windows.
-   (`IUnknown` is always slots 0/1/2; an interface's own methods start at 3.)
+2. **COM method calls**: `cffi.vcall(obj, slot, args, ret_kind)` calls a COM
+   object's method through its vtable, by *slot number* (COM is objects, not
+   flat functions). This drives DirectX, Media Foundation, WIC, the Windows
+   shell, audio, anything object-based on Windows. (`IUnknown` is always slots
+   0/1/2; an interface's own methods start at 3.)
 
 3. **Callbacks**: `cffi.callback(fn)` turns a Lumen function into a C function
-   pointer the operating system can call *back into*. That's what a window needs
-   (a `WndProc`), and what enumeration and timer APIs use. Callbacks require a
-   compiled program: a Lumen function in the interpreter has no machine-code
-   address to hand out, so `lumen run` tells you to `lumen build`.
+   pointer the OS can call *back into*: what a window's `WndProc` needs, and what
+   enumeration and timer APIs use. Callbacks require a compiled program: a Lumen
+   function in the interpreter has no machine-code address, so `lumen run` tells
+   you to `lumen build`.
 
 4. **Helpers**: `cffi.guid("...")` parses a COM interface ID string into the
    bytes Windows expects, and `cffi.str_ptr(s)` hands you a string's `char*` to
@@ -71,14 +69,13 @@ primitives, each layering on the last. They live in the `cffi` module.
 
 ## The payoff
 
-Put those together and you can open a real GPU-accelerated window and draw to it,
-entirely in Lumen. See `examples/DirectX/`. Nothing to install: the DLLs
-(`d2d1.dll`, `user32.dll`, and friends) ship with Windows; you just name them in
-`extern` blocks. Smaller demos live in `examples/win32ui/` (native dialogs),
-`examples/com/` (COM calls), and `examples/callback/` (a callback fired by the
-OS).
+Together they open a real GPU-accelerated window you draw to, entirely in Lumen.
+See `examples/DirectX/`. Nothing to install: the DLLs (`d2d1.dll`, `user32.dll`,
+and friends) ship with Windows; you just name them in `extern` blocks. Smaller
+demos live in `examples/win32ui/` (native dialogs), `examples/com/` (COM calls),
+and `examples/callback/` (a callback fired by the OS).
 
 ## A reassurance
 
-None of this slows your code down. The FFI machinery sits entirely on the cold
-path; the [fast numeric codegen](performance.md) is untouched by it.
+None of it slows your code: the FFI machinery sits on the cold path, and the
+[fast numeric codegen](performance.md) is untouched.
