@@ -1143,13 +1143,22 @@ impl LlvmGen {
         ctx: &mut Ctx,
         out: &mut String,
     ) -> Result<String, String> {
-        self.need("lumen_list_new", "i64 @lumen_list_new(i64)");
+        // arena-allocate the accumulator when this comp initializes a non-escaping
+        // local. Clear arena_now before the body so element allocations stay heap.
+        let arena = ctx.arena_now;
+        ctx.arena_now = false;
+        let ctor = if arena {
+            "lumen_list_new_arena"
+        } else {
+            "lumen_list_new"
+        };
+        self.need(ctor, &format!("i64 @{ctor}(i64)"));
         let acc = format!("__lc_acc_{}", {
             self.tmp += 1;
             self.tmp
         });
         let lst = self.vreg();
-        let _ = writeln!(out, "  {lst} = call i64 @lumen_list_new(i64 0)");
+        let _ = writeln!(out, "  {lst} = call i64 @{ctor}(i64 0)");
         let accslot = format!("%l.{}", sanitize(&acc));
         let _ = writeln!(out, "  {accslot} = alloca i64");
         let _ = writeln!(out, "  store i64 {lst}, ptr {accslot}");
