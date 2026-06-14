@@ -12,45 +12,45 @@ use crate::types::IntInfo;
 // Gate deciding whether a function may take the MIR fast path. Anything not
 // provably numeric-scalar here falls back to the interpreter, so this must only
 // admit shapes the lowerer can actually handle.
-fn all_numeric_sig(f: &FnDef) -> bool {
+fn all_numsig(f: &FnDef) -> bool {
     let is_num = |t: &Type| matches!(t, Type::Named(n) if n == "i64" || n == "f64");
     !f.is_method && f.params.iter().all(|p| is_num(&p.ty)) && is_num(&f.ret)
 }
 
 pub fn mir_eligible(f: &FnDef, info: &IntInfo) -> bool {
     let _ = info;
-    if !all_numeric_sig(f) {
+    if !all_numsig(f) {
         return false;
     }
-    f.body.iter().all(stmt_mir_ok)
+    f.body.iter().all(stmt_ok)
 }
 
-fn stmt_mir_ok(s: &Stmt) -> bool {
+fn stmt_ok(s: &Stmt) -> bool {
     match s {
-        Stmt::Let { value, .. } => expr_mir_ok(value),
-        Stmt::Assign { target, value } => matches!(target, Expr::Ident(_)) && expr_mir_ok(value),
-        Stmt::ExprStmt(e) => expr_mir_ok(e),
-        Stmt::Return(opt) => opt.as_ref().map(expr_mir_ok).unwrap_or(true),
+        Stmt::Let { value, .. } => expr_ok(value),
+        Stmt::Assign { target, value } => matches!(target, Expr::Ident(_)) && expr_ok(value),
+        Stmt::ExprStmt(e) => expr_ok(e),
+        Stmt::Return(opt) => opt.as_ref().map(expr_ok).unwrap_or(true),
         Stmt::If {
             cond,
             then,
             elifs,
             els,
         } => {
-            expr_mir_ok(cond)
-                && then.iter().all(stmt_mir_ok)
+            expr_ok(cond)
+                && then.iter().all(stmt_ok)
                 && elifs
                     .iter()
-                    .all(|(c, b)| expr_mir_ok(c) && b.iter().all(stmt_mir_ok))
+                    .all(|(c, b)| expr_ok(c) && b.iter().all(stmt_ok))
                 && els
                     .as_ref()
-                    .map(|b| b.iter().all(stmt_mir_ok))
+                    .map(|b| b.iter().all(stmt_ok))
                     .unwrap_or(true)
         }
-        Stmt::While { cond, body } => expr_mir_ok(cond) && body.iter().all(stmt_mir_ok),
+        Stmt::While { cond, body } => expr_ok(cond) && body.iter().all(stmt_ok),
 
         Stmt::For { iter, body, .. } => {
-            matches!(iter, Expr::Range { .. }) && body.iter().all(stmt_mir_ok)
+            matches!(iter, Expr::Range { .. }) && body.iter().all(stmt_ok)
         }
 
         Stmt::Try { .. } | Stmt::Raise(_) => false,
@@ -58,18 +58,18 @@ fn stmt_mir_ok(s: &Stmt) -> bool {
     }
 }
 
-fn expr_mir_ok(e: &Expr) -> bool {
+fn expr_ok(e: &Expr) -> bool {
     match e {
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Ident(_) => true,
-        Expr::Unary { expr, .. } => expr_mir_ok(expr),
-        Expr::Binary { lhs, rhs, .. } => expr_mir_ok(lhs) && expr_mir_ok(rhs),
+        Expr::Unary { expr, .. } => expr_ok(expr),
+        Expr::Binary { lhs, rhs, .. } => expr_ok(lhs) && expr_ok(rhs),
 
         Expr::Call { callee, args } => {
-            matches!(&**callee, Expr::Ident(_)) && args.iter().all(expr_mir_ok)
+            matches!(&**callee, Expr::Ident(_)) && args.iter().all(expr_ok)
         }
-        Expr::Range { lo, hi } => expr_mir_ok(lo) && expr_mir_ok(hi),
+        Expr::Range { lo, hi } => expr_ok(lo) && expr_ok(hi),
         Expr::IfElse { cond, then, els } => {
-            expr_mir_ok(cond) && expr_mir_ok(then) && expr_mir_ok(els)
+            expr_ok(cond) && expr_ok(then) && expr_ok(els)
         }
 
         _ => false,
@@ -259,8 +259,8 @@ pub struct MirFn {
     pub name: String,
     pub n_params: u32,
 
-    pub param_is_float: Vec<bool>,
-    pub ret_is_float: bool,
+    pub param_float: Vec<bool>,
+    pub ret_float: bool,
     pub entry: BlockId,
     pub blocks: Vec<Block>,
     pub next_vreg: Vreg,
@@ -269,13 +269,13 @@ pub struct MirFn {
 }
 
 impl MirFn {
-    pub fn new(name: impl Into<String>, param_is_float: Vec<bool>, ret_is_float: bool) -> MirFn {
-        let n_params = param_is_float.len() as u32;
+    pub fn new(name: impl Into<String>, param_float: Vec<bool>, ret_float: bool) -> MirFn {
+        let n_params = param_float.len() as u32;
         MirFn {
             name: name.into(),
             n_params,
-            param_is_float,
-            ret_is_float,
+            param_float,
+            ret_float,
             entry: 0,
             blocks: Vec::new(),
             next_vreg: 0,
@@ -372,7 +372,7 @@ impl Dom {
 
 #[derive(Default)]
 pub struct SigMap {
-    pub ret_is_float: HashMap<String, bool>,
+    pub ret_float: HashMap<String, bool>,
 }
 
 impl SigMap {
@@ -384,9 +384,9 @@ impl SigMap {
                 if !f.is_method {
                     if let crate::ast::Type::Named(n) = &f.ret {
                         if n == "f64" {
-                            m.ret_is_float.insert(f.name.clone(), true);
+                            m.ret_float.insert(f.name.clone(), true);
                         } else if n == "i64" {
-                            m.ret_is_float.insert(f.name.clone(), false);
+                            m.ret_float.insert(f.name.clone(), false);
                         }
                     }
                 }
@@ -418,12 +418,12 @@ struct Lowerer<'a> {
 }
 
 impl<'a> Lowerer<'a> {
-    fn new(name: &str, params: &[crate::ast::Param], ret_is_float: bool, sigs: &'a SigMap) -> Self {
-        let param_is_float: Vec<bool> = params
+    fn new(name: &str, params: &[crate::ast::Param], ret_float: bool, sigs: &'a SigMap) -> Self {
+        let param_float: Vec<bool> = params
             .iter()
             .map(|p| matches!(&p.ty, crate::ast::Type::Named(n) if n == "f64"))
             .collect();
-        let mut f = MirFn::new(name, param_is_float.clone(), ret_is_float);
+        let mut f = MirFn::new(name, param_float.clone(), ret_float);
         let entry = f.new_block();
         f.entry = entry;
         let mut lw = Lowerer {
@@ -442,7 +442,7 @@ impl<'a> Lowerer<'a> {
         lw.sealed.insert(entry);
 
         for (i, p) in params.iter().enumerate() {
-            let dom = if param_is_float[i] {
+            let dom = if param_float[i] {
                 Dom::Float
             } else {
                 Dom::Int
@@ -469,13 +469,13 @@ impl<'a> Lowerer<'a> {
         {
             return v;
         }
-        self.read_var_recursive(name, block)
+        self.read_rec(name, block)
     }
 
     // SSA name lookup that crosses block boundaries (Braun et al.). For an
     // unsealed block we cannot yet know all predecessors, so we park an
     // incomplete phi and fill its operands when the block is sealed.
-    fn read_var_recursive(&mut self, name: &str, block: BlockId) -> Val {
+    fn read_rec(&mut self, name: &str, block: BlockId) -> Val {
         let val = if !self.sealed.contains(&block) {
             let phi = self.fresh_phi(block);
             self.incomplete_phis
@@ -500,8 +500,8 @@ impl<'a> Lowerer<'a> {
 
                 let phi = self.fresh_phi(block);
                 self.write_var(name, block, Val::Vreg(phi));
-                self.add_phi_operands(name, block, phi);
-                self.try_remove_phi(block, phi)
+                self.add_phis(name, block, phi);
+                self.drop_phi(block, phi)
             }
         };
         self.write_var(name, block, val);
@@ -525,17 +525,17 @@ impl<'a> Lowerer<'a> {
         dst
     }
 
-    fn add_phi_operands(&mut self, name: &str, block: BlockId, phi: Vreg) {
+    fn add_phis(&mut self, name: &str, block: BlockId, phi: Vreg) {
         let preds = self.preds.get(&block).cloned().unwrap_or_default();
         let mut srcs = Vec::with_capacity(preds.len());
         for p in &preds {
             let pv = self.read_var(name, *p);
             srcs.push((*p, pv));
         }
-        self.set_phi_srcs(block, phi, srcs);
+        self.set_phis(block, phi, srcs);
     }
 
-    fn set_phi_srcs(&mut self, block: BlockId, phi: Vreg, srcs: Vec<(BlockId, Val)>) {
+    fn set_phis(&mut self, block: BlockId, phi: Vreg, srcs: Vec<(BlockId, Val)>) {
         for i in &mut self.f.block_mut(block).insts {
             if let Inst::Phi { dst, srcs: s } = i {
                 if *dst == phi {
@@ -560,7 +560,7 @@ impl<'a> Lowerer<'a> {
     // Trivial-phi elimination: if a phi's only distinct operand (ignoring self
     // references) is a single value, the phi is redundant. Replace it everywhere
     // so SSA stays minimal and downstream uses see the real def.
-    fn try_remove_phi(&mut self, block: BlockId, phi: Vreg) -> Val {
+    fn drop_phi(&mut self, block: BlockId, phi: Vreg) -> Val {
         let srcs = self.phi_srcs(block, phi);
         let mut same: Option<Val> = None;
         for (_, v) in &srcs {
@@ -582,11 +582,11 @@ impl<'a> Lowerer<'a> {
             .block_mut(block)
             .insts
             .retain(|i| !matches!(i, Inst::Phi { dst, .. } if *dst == phi));
-        self.replace_all_uses(Val::Vreg(phi), replacement);
+        self.replace_uses(Val::Vreg(phi), replacement);
         replacement
     }
 
-    fn replace_all_uses(&mut self, old: Val, new: Val) {
+    fn replace_uses(&mut self, old: Val, new: Val) {
         for b in &mut self.f.blocks {
             for i in &mut b.insts {
                 match i {
@@ -653,9 +653,9 @@ impl<'a> Lowerer<'a> {
         }
         if let Some(phis) = self.incomplete_phis.remove(&block) {
             for (name, phi) in phis {
-                self.add_phi_operands(&name, block, phi);
+                self.add_phis(&name, block, phi);
 
-                let v = self.try_remove_phi(block, phi);
+                let v = self.drop_phi(block, phi);
                 if v != Val::Vreg(phi) {
                     self.write_var(&name, block, v);
                 }
@@ -722,7 +722,7 @@ impl<'a> Lowerer<'a> {
             },
             Expr::Call { callee, .. } => {
                 if let Expr::Ident(n) = &**callee {
-                    if self.sigs.ret_is_float.get(n).copied().unwrap_or(false) {
+                    if self.sigs.ret_float.get(n).copied().unwrap_or(false) {
                         return Dom::Float;
                     }
                 }
@@ -781,7 +781,7 @@ impl<'a> Lowerer<'a> {
                     _ => unreachable!("gate admits only direct-name calls"),
                 };
                 let arg_vals: Vec<Val> = args.iter().map(|a| self.lower_expr(a)).collect();
-                let is_float = self.sigs.ret_is_float.get(&name).copied().unwrap_or(false);
+                let is_float = self.sigs.ret_float.get(&name).copied().unwrap_or(false);
                 let dst = self.f.fresh_vreg();
                 self.emit(Inst::Call {
                     dst,
@@ -837,7 +837,7 @@ impl<'a> Lowerer<'a> {
     fn lower_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Val {
 
         if matches!(op, BinOp::And | BinOp::Or) {
-            return self.lower_short_circuit(op, lhs, rhs);
+            return self.lower_shortcct(op, lhs, rhs);
         }
         let float = self.expr_dom(lhs).is_float() || self.expr_dom(rhs).is_float();
         let a = self.lower_expr(lhs);
@@ -896,7 +896,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    fn lower_short_circuit(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Val {
+    fn lower_shortcct(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Val {
         let rhs_b = self.f.new_block();
         let join_b = self.f.new_block();
         let cur = self.cur.expect("sc in terminated block");
@@ -1025,10 +1025,10 @@ impl<'a> Lowerer<'a> {
                 els,
             } => self.lower_if(cond, then, elifs, els),
             Stmt::While { cond, body } => self.lower_while(cond, body),
-            Stmt::For { var, iter, body } => self.lower_for_range(var, iter, body),
+            Stmt::For { var, iter, body } => self.lower_range(var, iter, body),
 
             Stmt::Try { .. } | Stmt::Raise(_) => {
-                unreachable!("try/raise are not MIR-eligible (see stmt_mir_ok)")
+                unreachable!("try/raise are not MIR-eligible (see stmt_ok)")
             }
         }
     }
@@ -1126,7 +1126,7 @@ impl<'a> Lowerer<'a> {
         self.cur = Some(exit_b);
     }
 
-    fn lower_for_range(&mut self, var: &str, iter: &Expr, body: &[Stmt]) {
+    fn lower_range(&mut self, var: &str, iter: &Expr, body: &[Stmt]) {
         let (lo, hi) = match iter {
             Expr::Range { lo, hi } => (lo, hi),
             _ => unreachable!("gate admits only for-range"),
@@ -1191,7 +1191,7 @@ impl<'a> Lowerer<'a> {
     fn finish(mut self) -> MirFn {
 
         if let Some(b) = self.cur.take() {
-            let v = if self.f.ret_is_float {
+            let v = if self.f.ret_float {
                 Val::float(0.0)
             } else {
                 Val::IntConst(0)
@@ -1214,8 +1214,8 @@ fn const_int(e: &Expr) -> Option<i64> {
 }
 
 pub fn lower_fn(f: &FnDef, sigs: &SigMap) -> Result<MirFn, String> {
-    let ret_is_float = matches!(&f.ret, crate::ast::Type::Named(n) if n == "f64");
-    let mut lw = Lowerer::new(&f.name, &f.params, ret_is_float, sigs);
+    let ret_float = matches!(&f.ret, crate::ast::Type::Named(n) if n == "f64");
+    let mut lw = Lowerer::new(&f.name, &f.params, ret_float, sigs);
     lw.lower_block(&f.body);
     let mir = lw.finish();
     mir.validate()?;
@@ -1235,7 +1235,7 @@ pub struct RegAlloc {
 
     pub loc: std::collections::HashMap<Vreg, Loc>,
 
-    pub callee_saved_used: Vec<&'static str>,
+    pub saved_regs: Vec<&'static str>,
 }
 
 impl RegAlloc {
@@ -1476,7 +1476,7 @@ pub fn regalloc(mir: &MirFn) -> RegAlloc {
         }
     }
 
-    ra.callee_saved_used = MIR_CALLEE
+    ra.saved_regs = MIR_CALLEE
         .iter()
         .copied()
         .filter(|r| callee_used.contains(r))
@@ -1510,7 +1510,7 @@ mod tests {
     }
 
     #[test]
-    fn eligible_for_range_sum() {
+    fn rangesum_ok() {
         let f = parse_fn(
             "fn s(n: i64) -> i64:\n    let t = 0\n    for i in 0..n:\n        t = t + i\n    return t\n",
         );
@@ -1518,19 +1518,19 @@ mod tests {
     }
 
     #[test]
-    fn inelig_uses_list() {
+    fn inelig_list() {
         let f = parse_fn("fn f(n: i64) -> i64:\n    let xs = [1, 2, 3]\n    return n\n");
         assert!(!mir_eligible(&f, &IntInfo::default()));
     }
 
     #[test]
-    fn inelig_non_numeric() {
+    fn inelig_nonnum() {
         let f = parse_fn("fn f(s: str) -> i64:\n    return 1\n");
         assert!(!mir_eligible(&f, &IntInfo::default()));
     }
 
     #[test]
-    fn inelig_for_over_list() {
+    fn inelig_forlist() {
         let f = parse_fn(
             "fn f(n: i64) -> i64:\n    let t = 0\n    for x in [1, 2]:\n        t = t + x\n    return t\n",
         );
@@ -1538,7 +1538,7 @@ mod tests {
     }
 
     #[test]
-    fn val_float_roundtrip() {
+    fn float_round() {
 
         assert_eq!(Val::float(1.5), Val::FloatConst(1.5f64.to_bits()));
         assert_eq!(Val::float(-0.0), Val::FloatConst(0x8000_0000_0000_0000));
@@ -1556,7 +1556,7 @@ mod tests {
     }
 
     #[test]
-    fn inst_def_and_terminator() {
+    fn def_term() {
         let bin = Inst::Bin {
             dst: 3,
             op: BinKind::IAdd,
@@ -1581,7 +1581,7 @@ mod tests {
     }
 
     #[test]
-    fn build_add_by_hand() {
+    fn hand_add() {
         let mut f = MirFn::new("add", vec![false, false], false);
         let entry = f.new_block();
         assert_eq!(entry, 0);
@@ -1608,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn build_loop_cfg() {
+    fn loop_cfg() {
 
         let mut f = MirFn::new("loopy", vec![false], false);
         let entry = f.new_block();
@@ -1656,7 +1656,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_open_block() {
+    fn reject_open() {
         let mut f = MirFn::new("bad", vec![], false);
         let b = f.new_block();
         f.block_mut(b).insts.push(Inst::Move {
@@ -1667,7 +1667,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_phi_after_nonphi() {
+    fn reject_latephi() {
         let mut f = MirFn::new("bad2", vec![], false);
         let b = f.new_block();
         f.block_mut(b).insts.push(Inst::Move {
@@ -1683,7 +1683,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_oob_branch() {
+    fn reject_oob() {
         let mut f = MirFn::new("bad3", vec![], false);
         let b = f.new_block();
         f.block_mut(b).insts.push(Inst::Jmp(99));
@@ -1718,7 +1718,7 @@ mod tests {
         let m = lower("fn add(a: i64, b: i64) -> i64:\n    return a + b\n");
         assert!(m.validate().is_ok());
         assert_eq!(m.n_params, 2);
-        assert!(!m.ret_is_float);
+        assert!(!m.ret_float);
         assert_eq!(count_phis(&m), 0);
 
         let adds: Vec<_> = m
@@ -1744,9 +1744,9 @@ mod tests {
     }
 
     #[test]
-    fn lower_float_add() {
+    fn float_add() {
         let m = lower("fn fadd(a: f64, b: f64) -> f64:\n    return a + b\n");
-        assert!(m.ret_is_float);
+        assert!(m.ret_float);
         let has_fadd = m.blocks.iter().flat_map(|b| &b.insts).any(|i| {
             matches!(
                 i,
@@ -1792,7 +1792,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_for_range_phi() {
+    fn range_phi() {
 
         let m = lower(
             "fn s(n: i64) -> i64:\n    let t = 0\n    for i in 0..n:\n        t = t + i\n    return t\n",
@@ -1824,7 +1824,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_while_ok() {
+    fn while_ok() {
         let m = lower(
             "fn countdown(n: i64) -> i64:\n    let acc = 0\n    while n > 0:\n        acc = acc + n\n        n = n - 1\n    return acc\n",
         );
@@ -1833,7 +1833,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_const_div_magic() {
+    fn magic_div() {
 
         let m = lower("fn r(x: i64) -> i64:\n    return x % 7\n");
         let has_modconst = m.blocks.iter().flat_map(|b| &b.insts).any(|i| {
@@ -1849,7 +1849,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_runtime_div_idiv() {
+    fn rt_idiv() {
 
         let m = lower("fn d(x: i64, y: i64) -> i64:\n    return x / y\n");
         let has_idiv = m.blocks.iter().flat_map(|b| &b.insts).any(|i| {
@@ -1865,7 +1865,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_ssa_single_def() {
+    fn ssa_onedef() {
         let srcs = [
             "fn add(a: i64, b: i64) -> i64:\n    return a + b\n",
             "fn fib(n: i64) -> i64:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\n",
@@ -1942,29 +1942,29 @@ mod tests {
                 })
                 .collect();
             let reported: std::collections::HashSet<&str> =
-                ra.callee_saved_used.iter().copied().collect();
+                ra.saved_regs.iter().copied().collect();
             assert_eq!(assigned_callee, reported, "callee set mismatch in: {src}");
         }
     }
 
     #[test]
-    fn regalloc_fib_callee_saved() {
+    fn ra_callee() {
         let m = lower(
             "fn fib(n: i64) -> i64:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\n",
         );
         let ra = regalloc(&m);
         assert!(
-            !ra.callee_saved_used.is_empty(),
+            !ra.saved_regs.is_empty(),
             "fib should park a cross-call value in a callee-saved register"
         );
     }
 
     #[test]
-    fn regalloc_prefers_volatile() {
+    fn ra_volatile() {
         let m = lower("fn add(a: i64, b: i64) -> i64:\n    return a + b\n");
         let ra = regalloc(&m);
         assert!(
-            ra.callee_saved_used.is_empty(),
+            ra.saved_regs.is_empty(),
             "call-free fn should not need callee-saved registers"
         );
     }

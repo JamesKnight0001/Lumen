@@ -1,4 +1,3 @@
-
 //! Lambda lifting. Hoists every lambda into a top-level fn named `__lambda_N`,
 //! turning its free variables into leading parameters and the lambda site into
 //! a Closure (or a bare fn reference when there are no captures). The subtle
@@ -43,7 +42,7 @@ pub fn lift_program(prog: &mut Program) {
         })
         .collect();
     if !top_refs.is_empty() {
-        ctx.process_unit_refs(&mut top_refs);
+        ctx.proc_refs(&mut top_refs);
     }
 
     for f in ctx.generated.drain(..) {
@@ -77,13 +76,13 @@ impl Lifter {
         }
     }
 
-    fn process_unit_refs(&mut self, body: &mut [&mut Stmt]) {
+    fn proc_refs(&mut self, body: &mut [&mut Stmt]) {
         let celled = {
             let mut captured = HashSet::new();
             let mut assigned = HashSet::new();
             for s in body.iter() {
                 captured_stmt(s, &self.globals, &mut captured);
-                assigned_in_stmt(s, &mut assigned);
+                is_assigned(s, &mut assigned);
             }
             captured
                 .intersection(&assigned)
@@ -107,7 +106,7 @@ impl Lifter {
         let mut assigned = HashSet::new();
         for s in body {
             captured_stmt(s, &self.globals, &mut captured);
-            assigned_in_stmt(s, &mut assigned);
+            is_assigned(s, &mut assigned);
         }
         captured.intersection(&assigned).cloned().collect()
     }
@@ -481,12 +480,12 @@ fn cell_expr(e: &mut Expr, celled: &HashSet<String>) {
 
 fn captured_stmt(s: &Stmt, globals: &HashSet<String>, out: &mut HashSet<String>) {
     match s {
-        Stmt::Let { value, .. } => captured_in_expr(value, globals, out),
+        Stmt::Let { value, .. } => captured_expr(value, globals, out),
         Stmt::Assign { target, value } => {
-            captured_in_expr(target, globals, out);
-            captured_in_expr(value, globals, out);
+            captured_expr(target, globals, out);
+            captured_expr(value, globals, out);
         }
-        Stmt::ExprStmt(e) | Stmt::Return(Some(e)) => captured_in_expr(e, globals, out),
+        Stmt::ExprStmt(e) | Stmt::Return(Some(e)) => captured_expr(e, globals, out),
         Stmt::Return(None) => {}
         Stmt::If {
             cond,
@@ -494,12 +493,12 @@ fn captured_stmt(s: &Stmt, globals: &HashSet<String>, out: &mut HashSet<String>)
             elifs,
             els,
         } => {
-            captured_in_expr(cond, globals, out);
+            captured_expr(cond, globals, out);
             for s in then {
                 captured_stmt(s, globals, out);
             }
             for (c, b) in elifs {
-                captured_in_expr(c, globals, out);
+                captured_expr(c, globals, out);
                 for s in b {
                     captured_stmt(s, globals, out);
                 }
@@ -511,13 +510,13 @@ fn captured_stmt(s: &Stmt, globals: &HashSet<String>, out: &mut HashSet<String>)
             }
         }
         Stmt::While { cond, body } => {
-            captured_in_expr(cond, globals, out);
+            captured_expr(cond, globals, out);
             for s in body {
                 captured_stmt(s, globals, out);
             }
         }
         Stmt::For { iter, body, .. } => {
-            captured_in_expr(iter, globals, out);
+            captured_expr(iter, globals, out);
             for s in body {
                 captured_stmt(s, globals, out);
             }
@@ -532,12 +531,12 @@ fn captured_stmt(s: &Stmt, globals: &HashSet<String>, out: &mut HashSet<String>)
                 captured_stmt(s, globals, out);
             }
         }
-        Stmt::Raise(e) => captured_in_expr(e, globals, out),
+        Stmt::Raise(e) => captured_expr(e, globals, out),
         Stmt::Break | Stmt::Continue | Stmt::SrcLine(_) => {}
     }
 }
 
-fn captured_in_expr(e: &Expr, globals: &HashSet<String>, out: &mut HashSet<String>) {
+fn captured_expr(e: &Expr, globals: &HashSet<String>, out: &mut HashSet<String>) {
     match e {
         Expr::Lambda { params, body } => {
             let mut bound: HashSet<String> = params.iter().cloned().collect();
@@ -550,76 +549,76 @@ fn captured_in_expr(e: &Expr, globals: &HashSet<String>, out: &mut HashSet<Strin
                 captured_stmt(s, globals, out);
             }
         }
-        Expr::Unary { expr, .. } => captured_in_expr(expr, globals, out),
+        Expr::Unary { expr, .. } => captured_expr(expr, globals, out),
         Expr::Binary { lhs, rhs, .. } => {
-            captured_in_expr(lhs, globals, out);
-            captured_in_expr(rhs, globals, out);
+            captured_expr(lhs, globals, out);
+            captured_expr(rhs, globals, out);
         }
         Expr::Call { callee, args } => {
-            captured_in_expr(callee, globals, out);
+            captured_expr(callee, globals, out);
             for a in args {
-                captured_in_expr(a, globals, out);
+                captured_expr(a, globals, out);
             }
         }
         Expr::NamedCall { callee, args } => {
-            captured_in_expr(callee, globals, out);
+            captured_expr(callee, globals, out);
             for (_, a) in args {
-                captured_in_expr(a, globals, out);
+                captured_expr(a, globals, out);
             }
         }
         Expr::Method { obj, args, .. } => {
-            captured_in_expr(obj, globals, out);
+            captured_expr(obj, globals, out);
             for a in args {
-                captured_in_expr(a, globals, out);
+                captured_expr(a, globals, out);
             }
         }
-        Expr::Field { obj, .. } => captured_in_expr(obj, globals, out),
+        Expr::Field { obj, .. } => captured_expr(obj, globals, out),
         Expr::Index { obj, index } => {
-            captured_in_expr(obj, globals, out);
-            captured_in_expr(index, globals, out);
+            captured_expr(obj, globals, out);
+            captured_expr(index, globals, out);
         }
         Expr::List(xs) => {
             for x in xs {
-                captured_in_expr(x, globals, out);
+                captured_expr(x, globals, out);
             }
         }
         Expr::Map(kvs) => {
             for (k, v) in kvs {
-                captured_in_expr(k, globals, out);
-                captured_in_expr(v, globals, out);
+                captured_expr(k, globals, out);
+                captured_expr(v, globals, out);
             }
         }
         Expr::Range { lo, hi } => {
-            captured_in_expr(lo, globals, out);
-            captured_in_expr(hi, globals, out);
+            captured_expr(lo, globals, out);
+            captured_expr(hi, globals, out);
         }
         Expr::FStr(parts) => {
             for p in parts {
                 if let FStrPart::Expr(pe) = p {
-                    captured_in_expr(pe, globals, out);
+                    captured_expr(pe, globals, out);
                 }
             }
         }
         Expr::Closure { captures, .. } => {
             for c in captures {
-                captured_in_expr(c, globals, out);
+                captured_expr(c, globals, out);
             }
         }
         _ => {}
     }
 }
 
-fn assigned_in_stmt(s: &Stmt, out: &mut HashSet<String>) {
+fn is_assigned(s: &Stmt, out: &mut HashSet<String>) {
     match s {
-        Stmt::Let { value, .. } => assigned_in_expr(value, out),
+        Stmt::Let { value, .. } => assigned_expr(value, out),
         Stmt::Assign { target, value } => {
             if let Expr::Ident(n) = target {
                 out.insert(n.clone());
             }
-            assigned_in_expr(target, out);
-            assigned_in_expr(value, out);
+            assigned_expr(target, out);
+            assigned_expr(value, out);
         }
-        Stmt::ExprStmt(e) | Stmt::Return(Some(e)) => assigned_in_expr(e, out),
+        Stmt::ExprStmt(e) | Stmt::Return(Some(e)) => assigned_expr(e, out),
         Stmt::Return(None) => {}
         Stmt::If {
             cond,
@@ -627,105 +626,105 @@ fn assigned_in_stmt(s: &Stmt, out: &mut HashSet<String>) {
             elifs,
             els,
         } => {
-            assigned_in_expr(cond, out);
+            assigned_expr(cond, out);
             for s in then {
-                assigned_in_stmt(s, out);
+                is_assigned(s, out);
             }
             for (c, b) in elifs {
-                assigned_in_expr(c, out);
+                assigned_expr(c, out);
                 for s in b {
-                    assigned_in_stmt(s, out);
+                    is_assigned(s, out);
                 }
             }
             if let Some(b) = els {
                 for s in b {
-                    assigned_in_stmt(s, out);
+                    is_assigned(s, out);
                 }
             }
         }
         Stmt::While { cond, body } => {
-            assigned_in_expr(cond, out);
+            assigned_expr(cond, out);
             for s in body {
-                assigned_in_stmt(s, out);
+                is_assigned(s, out);
             }
         }
         Stmt::For { var, iter, body } => {
             let _ = var;
-            assigned_in_expr(iter, out);
+            assigned_expr(iter, out);
             for s in body {
-                assigned_in_stmt(s, out);
+                is_assigned(s, out);
             }
         }
         Stmt::Try {
             body, catch_body, ..
         } => {
             for s in body {
-                assigned_in_stmt(s, out);
+                is_assigned(s, out);
             }
             for s in catch_body {
-                assigned_in_stmt(s, out);
+                is_assigned(s, out);
             }
         }
-        Stmt::Raise(e) => assigned_in_expr(e, out),
+        Stmt::Raise(e) => assigned_expr(e, out),
         Stmt::Break | Stmt::Continue | Stmt::SrcLine(_) => {}
     }
 }
 
-fn assigned_in_expr(e: &Expr, out: &mut HashSet<String>) {
+fn assigned_expr(e: &Expr, out: &mut HashSet<String>) {
     match e {
 
         Expr::Lambda { body, .. } => {
             for s in body {
-                assigned_in_stmt(s, out);
+                is_assigned(s, out);
             }
         }
-        Expr::Unary { expr, .. } => assigned_in_expr(expr, out),
+        Expr::Unary { expr, .. } => assigned_expr(expr, out),
         Expr::Binary { lhs, rhs, .. } => {
-            assigned_in_expr(lhs, out);
-            assigned_in_expr(rhs, out);
+            assigned_expr(lhs, out);
+            assigned_expr(rhs, out);
         }
         Expr::Call { callee, args } => {
-            assigned_in_expr(callee, out);
+            assigned_expr(callee, out);
             for a in args {
-                assigned_in_expr(a, out);
+                assigned_expr(a, out);
             }
         }
         Expr::NamedCall { callee, args } => {
-            assigned_in_expr(callee, out);
+            assigned_expr(callee, out);
             for (_, a) in args {
-                assigned_in_expr(a, out);
+                assigned_expr(a, out);
             }
         }
         Expr::Method { obj, args, .. } => {
-            assigned_in_expr(obj, out);
+            assigned_expr(obj, out);
             for a in args {
-                assigned_in_expr(a, out);
+                assigned_expr(a, out);
             }
         }
-        Expr::Field { obj, .. } => assigned_in_expr(obj, out),
+        Expr::Field { obj, .. } => assigned_expr(obj, out),
         Expr::Index { obj, index } => {
-            assigned_in_expr(obj, out);
-            assigned_in_expr(index, out);
+            assigned_expr(obj, out);
+            assigned_expr(index, out);
         }
         Expr::List(xs) => {
             for x in xs {
-                assigned_in_expr(x, out);
+                assigned_expr(x, out);
             }
         }
         Expr::Map(kvs) => {
             for (k, v) in kvs {
-                assigned_in_expr(k, out);
-                assigned_in_expr(v, out);
+                assigned_expr(k, out);
+                assigned_expr(v, out);
             }
         }
         Expr::Range { lo, hi } => {
-            assigned_in_expr(lo, out);
-            assigned_in_expr(hi, out);
+            assigned_expr(lo, out);
+            assigned_expr(hi, out);
         }
         Expr::FStr(parts) => {
             for p in parts {
                 if let FStrPart::Expr(pe) = p {
-                    assigned_in_expr(pe, out);
+                    assigned_expr(pe, out);
                 }
             }
         }

@@ -1,12 +1,8 @@
-//! Whole-program type analysis that proves which variables, params, and return
-//! values stay pure i64, pure f64, or pure list-of-f64. The native/interp fast
-//! paths use these verdicts to pick unboxed representations.
-//!
-//! Soundness model: everything starts assumed-typed and the fixpoint only ever
-//! REMOVES facts (a greatest fixpoint / "optimistic then shrink" scheme). A
-//! conservative "no" is always safe; a wrong "yes" is not. The float-list
-//! analysis is the most delicate: a bogus float-list verdict makes a backend
-//! reinterpret boxed values as raw f64 bits, silently corrupting data.
+//! Whole-program type analysis proving which variables, params, and returns
+//! stay pure i64, f64, or list-of-f64, letting backends pick unboxed reps.
+//! Soundness: facts start assumed-true and the greatest fixpoint only ever
+//! REMOVES them, so a conservative "no" is safe but a wrong "yes" is not. A bogus
+//! float-list verdict is worst: a backend would read boxed values as raw f64 bits.
 
 use crate::ast::{BinOp, Expr, FStrPart, Item, Program, Stmt, UnOp};
 use std::collections::{HashMap, HashSet};
@@ -22,29 +18,29 @@ pub struct IntInfo {
 
     pub float_ret: HashSet<String>,
 
-    pub float_list_vars: HashMap<String, HashSet<String>>,
+    pub flvars: HashMap<String, HashSet<String>>,
 
-    pub float_list_ret: HashSet<String>,
+    pub flret: HashSet<String>,
 
-    pub int_list_vars: HashMap<String, HashSet<String>>,
+    pub ilvars: HashMap<String, HashSet<String>>,
 
-    pub int_list_ret: HashSet<String>,
+    pub ilret: HashSet<String>,
 }
 
 impl IntInfo {
-    pub fn is_int_var(&self, func: &str, name: &str) -> bool {
+    pub fn is_ivar(&self, func: &str, name: &str) -> bool {
         self.int_vars.get(func).is_some_and(|s| s.contains(name))
     }
-    pub fn is_float_var(&self, func: &str, name: &str) -> bool {
+    pub fn is_fvar(&self, func: &str, name: &str) -> bool {
         self.float_vars.get(func).is_some_and(|s| s.contains(name))
     }
-    pub fn is_float_list_var(&self, func: &str, name: &str) -> bool {
-        self.float_list_vars
+    pub fn is_flist(&self, func: &str, name: &str) -> bool {
+        self.flvars
             .get(func)
             .is_some_and(|s| s.contains(name))
     }
-    pub fn is_int_list_var(&self, func: &str, name: &str) -> bool {
-        self.int_list_vars
+    pub fn is_ilist(&self, func: &str, name: &str) -> bool {
+        self.ilvars
             .get(func)
             .is_some_and(|s| s.contains(name))
     }
@@ -75,30 +71,30 @@ pub fn analyze(prog: &Program) -> IntInfo {
     }
     let fn_names: HashSet<String> = fns.iter().map(|f| f.name.clone()).collect();
 
-    // Seed optimistically: assume every param and assigned var is an int, then
-    // let the fixpoint below remove any that can be disproven.
+    // Seed optimistically: assume every param and assigned var is int, then let
+    // the fixpoint below remove any that can be disproven.
     let mut int_vars: HashMap<String, HashSet<String>> = HashMap::new();
     for f in &fns {
         let mut vars: HashSet<String> = f.params.iter().cloned().collect();
-        seed_assigned_vars(f.body, &mut vars);
+        seed_vars(f.body, &mut vars);
         int_vars.insert(f.name.clone(), vars);
     }
 
-    // Functions reachable through a struct method: their typed-param assumption
-    // is unsound (method dispatch can pass any boxed value), so we drop it below.
+    // Functions reached via a struct method: method dispatch can pass any boxed
+    // value, so their typed-param assumption is unsound and we drop it below.
     let mut method_reached: HashSet<String> = HashSet::new();
     for item in prog {
         if let Item::Struct(s) = item {
             for m in &s.methods {
-                collect_fn_refs(&m.body, &fn_names, &mut method_reached);
+                fn_refs(&m.body, &fn_names, &mut method_reached);
             }
         }
     }
 
     let mut int_ret: HashSet<String> = fn_names.clone();
 
-    // Same hazard for escaped functions (used as values / closures): a caller
-    // we cannot see may pass non-int args, so their params lose the int guarantee.
+    // Same hazard for escaped functions (used as values/closures): an unseen
+    // caller may pass non-int args, so their params lose the int guarantee.
     let escaped = escaped_fns(&fns, &fn_names);
     for fname in escaped.iter().chain(method_reached.iter()) {
         if let Some(set) = int_vars.get_mut(fname) {
@@ -117,18 +113,18 @@ pub fn analyze(prog: &Program) -> IntInfo {
     let params_of: HashMap<&str, &Vec<String>> =
         fns.iter().map(|f| (f.name.as_str(), &f.params)).collect();
 
-    // Int-list candidates co-evolve WITH scalar-int in the loop below, because an
-    // index into a proven int-list (a[i]) is itself an int that feeds scalar-int
-    // facts. Both are greatest-fixpoint (seed optimistic, only ever remove), so a
-    // shared loop converges soundly. Seeded here so the first round can see them.
-    let mut int_list_vars: HashMap<String, HashSet<String>> = HashMap::new();
+    // Int-list candidates co-evolve WITH scalar-int below: an index into a proven
+    // int-list (a[i]) is itself an int feeding scalar-int facts. Both are greatest
+    // fixpoints (seed optimistic, only ever remove), so a shared loop converges
+    // soundly. Seeded here so the first round can see them.
+    let mut ilvars: HashMap<String, HashSet<String>> = HashMap::new();
     for f in &fns {
         let mut vars: HashSet<String> = f.params.iter().cloned().collect();
-        seed_assigned_vars(f.body, &mut vars);
-        int_list_vars.insert(f.name.clone(), vars);
+        seed_vars(f.body, &mut vars);
+        ilvars.insert(f.name.clone(), vars);
     }
     for fname in escaped.iter().chain(method_reached.iter()) {
-        if let Some(set) = int_list_vars.get_mut(fname) {
+        if let Some(set) = ilvars.get_mut(fname) {
             if let Some(f) = fns.iter().find(|f| &f.name == fname) {
                 for p in &f.params {
                     set.remove(p);
@@ -136,7 +132,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
             }
         }
     }
-    let mut int_list_ret: HashSet<String> = fn_names.clone();
+    let mut ilret: HashSet<String> = fn_names.clone();
     // Shared per-function use facts (bad_use / pushes / index_stores). Element-type
     // agnostic, so int-list and float-list both read them.
     let mut ilist_facts: HashMap<String, FlistFacts> = HashMap::new();
@@ -144,13 +140,13 @@ pub fn analyze(prog: &Program) -> IntInfo {
         ilist_facts.insert(f.name.clone(), flist_collect(f.body));
     }
 
-    // Int fixpoint: keep shrinking until nothing changes. Snapshots are taken at
-    // the top so every test reads a consistent state within the round.
+    // Int fixpoint: shrink until nothing changes. Snapshots taken at the top so
+    // every test reads a consistent state within the round.
     loop {
         let mut changed = false;
         let vsnap = int_vars.clone();
         let rsnap = int_ret.clone();
-        let ilsnap = int_list_vars.clone();
+        let ilsnap = ilvars.clone();
 
         for f in &fns {
             let mut assigns: Vec<(String, ValSrc)> = Vec::new();
@@ -163,7 +159,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                     !assigns
                         .iter()
                         .filter(|(name, _)| &name == v)
-                        .all(|(_, src)| val_is_int(src, &f.name, &vsnap, &rsnap, &fn_names, &ilsnap))
+                        .all(|(_, src)| val_int(src, &f.name, &vsnap, &rsnap, &fn_names, &ilsnap))
                 })
                 .cloned()
                 .collect();
@@ -190,7 +186,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                 let arg_ok = cs
                     .args
                     .get(k)
-                    .map(|a| expr_is_int(a, &cs.caller, &vsnap, &rsnap, &fn_names, &ilsnap))
+                    .map(|a| is_iexpr(a, &cs.caller, &vsnap, &rsnap, &fn_names, &ilsnap))
                     .unwrap_or(false);
                 if !arg_ok {
                     int_vars.get_mut(&cs.callee).unwrap().remove(pname);
@@ -199,16 +195,15 @@ pub fn analyze(prog: &Program) -> IntInfo {
             }
         }
 
-        // Int-list verdict, co-evolving in this same loop. A var keeps it only if
-        // it never escapes (bad_use) and every write (assign/push/index-store) is
-        // provably int. Reads via a[i] feed the scalar-int checks above through
-        // ilsnap, closing the cycle. A wrong "yes" would let the backend read boxed
-        // words as raw i64, so this stays as strict as the float-list case.
+        // Int-list verdict, co-evolving here. A var keeps it only if it never escapes
+        // (bad_use) and every write (assign/push/index-store) is provably int. Reads
+        // via a[i] feed scalar-int above through ilsnap, closing the cycle. A wrong
+        // "yes" lets the backend read boxed words as raw i64, as unsound as float-list.
         for f in &fns {
             let facts = ilist_facts.get(&f.name).unwrap();
             let mut assigns: Vec<(String, ValSrc)> = Vec::new();
             assignments(f.body, &mut assigns);
-            let cur = int_list_vars.get(&f.name).unwrap().clone();
+            let cur = ilvars.get(&f.name).unwrap().clone();
             let mut to_drop: Vec<String> = Vec::new();
             for v in &cur {
                 if facts.bad_use.contains(v) {
@@ -221,11 +216,10 @@ pub fn analyze(prog: &Program) -> IntInfo {
                         .filter(|(name, _)| name == v)
                         .all(|(_, src)| match src {
                             ValSrc::Expr(e) => {
-                                ilist_src_ok(e, &f.name, &vsnap, &rsnap, &fn_names, &ilsnap)
+                                ilist_ok(e, &f.name, &vsnap, &rsnap, &fn_names, &ilsnap)
                             }
                             // A `for x in lo..hi` loop var is an int scalar, not a
-                            // list; an int-list var is never sourced from IntRange
-                            // (that path builds the loop variable, not the list).
+                            // list: IntRange builds the loop variable, never the list.
                             ValSrc::IntRange | ValSrc::NonInt => false,
                         });
                 if !assigns_ok {
@@ -236,7 +230,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                     .pushes
                     .iter()
                     .filter(|(name, _)| name == v)
-                    .all(|(_, arg)| expr_is_int(arg, &f.name, &vsnap, &rsnap, &fn_names, &ilsnap));
+                    .all(|(_, arg)| is_iexpr(arg, &f.name, &vsnap, &rsnap, &fn_names, &ilsnap));
                 if !pushes_ok {
                     to_drop.push(v.clone());
                     continue;
@@ -245,14 +239,14 @@ pub fn analyze(prog: &Program) -> IntInfo {
                     .index_stores
                     .iter()
                     .filter(|(name, _)| name == v)
-                    .all(|(_, val)| expr_is_int(val, &f.name, &vsnap, &rsnap, &fn_names, &ilsnap));
+                    .all(|(_, val)| is_iexpr(val, &f.name, &vsnap, &rsnap, &fn_names, &ilsnap));
                 if !stores_ok {
                     to_drop.push(v.clone());
                     continue;
                 }
             }
             if !to_drop.is_empty() {
-                let m = int_list_vars.get_mut(&f.name).unwrap();
+                let m = ilvars.get_mut(&f.name).unwrap();
                 for v in to_drop {
                     m.remove(&v);
                     changed = true;
@@ -265,7 +259,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                 continue;
             };
             for (k, pname) in params.iter().enumerate() {
-                if !int_list_vars
+                if !ilvars
                     .get(&cs.callee)
                     .map(|s| s.contains(pname))
                     .unwrap_or(false)
@@ -275,27 +269,27 @@ pub fn analyze(prog: &Program) -> IntInfo {
                 let arg_ok = cs
                     .args
                     .get(k)
-                    .map(|a| is_ilist_val(a, &cs.caller, &ilsnap, &int_list_ret, &fn_names))
+                    .map(|a| ilist_val(a, &cs.caller, &ilsnap, &ilret, &fn_names))
                     .unwrap_or(false);
                 if !arg_ok {
-                    int_list_vars.get_mut(&cs.callee).unwrap().remove(pname);
+                    ilvars.get_mut(&cs.callee).unwrap().remove(pname);
                     changed = true;
                 }
             }
         }
 
         for f in &fns {
-            if int_list_ret.contains(&f.name)
-                && !returns_ilist(f.body, &f.name, &int_list_vars, &int_list_ret, &fn_names)
+            if ilret.contains(&f.name)
+                && !returns_ilist(f.body, &f.name, &ilvars, &ilret, &fn_names)
             {
-                int_list_ret.remove(&f.name);
+                ilret.remove(&f.name);
                 changed = true;
             }
         }
 
         for f in &fns {
             if int_ret.contains(&f.name)
-                && !all_int_ret(f.body, &f.name, &vsnap, &rsnap, &fn_names, &ilsnap)
+                && !all_iret(f.body, &f.name, &vsnap, &rsnap, &fn_names, &ilsnap)
             {
                 int_ret.remove(&f.name);
                 changed = true;
@@ -312,7 +306,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
     let mut float_vars: HashMap<String, HashSet<String>> = HashMap::new();
     for f in &fns {
         let mut vars: HashSet<String> = f.params.iter().cloned().collect();
-        seed_assigned_vars(f.body, &mut vars);
+        seed_vars(f.body, &mut vars);
         if let Some(iv) = int_vars.get(&f.name) {
             vars.retain(|v| !iv.contains(v));
         }
@@ -329,15 +323,15 @@ pub fn analyze(prog: &Program) -> IntInfo {
     }
     let mut float_ret: HashSet<String> = fn_names.clone();
 
-    let mut float_list_vars: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut flvars: HashMap<String, HashSet<String>> = HashMap::new();
     for f in &fns {
         let mut vars: HashSet<String> = f.params.iter().cloned().collect();
-        seed_assigned_vars(f.body, &mut vars);
-        float_list_vars.insert(f.name.clone(), vars);
+        seed_vars(f.body, &mut vars);
+        flvars.insert(f.name.clone(), vars);
     }
 
     for fname in escaped.iter().chain(method_reached.iter()) {
-        if let Some(set) = float_list_vars.get_mut(fname) {
+        if let Some(set) = flvars.get_mut(fname) {
             if let Some(f) = fns.iter().find(|f| &f.name == fname) {
                 for p in &f.params {
                     set.remove(p);
@@ -345,7 +339,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
             }
         }
     }
-    let mut float_list_ret: HashSet<String> = fn_names.clone();
+    let mut flret: HashSet<String> = fn_names.clone();
 
     // Per-function float-list facts (any unsafe use, every push arg, every
     // indexed-store value). Drives the float-list verdict below.
@@ -358,7 +352,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
         let mut changed = false;
         let vsnap = float_vars.clone();
         let rsnap = float_ret.clone();
-        let lsnap = float_list_vars.clone();
+        let lsnap = flvars.clone();
 
         for f in &fns {
             let mut assigns: Vec<(String, ValSrc)> = Vec::new();
@@ -371,7 +365,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                         .iter()
                         .filter(|(name, _)| &name == v)
                         .all(|(_, src)| {
-                            val_is_float(src, &f.name, &vsnap, &rsnap, &fn_names, &lsnap)
+                            val_float(src, &f.name, &vsnap, &rsnap, &fn_names, &lsnap)
                         })
                 })
                 .cloned()
@@ -397,7 +391,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                 let arg_ok = cs
                     .args
                     .get(k)
-                    .map(|a| expr_is_float(a, &cs.caller, &vsnap, &rsnap, &fn_names, &lsnap))
+                    .map(|a| is_fexpr(a, &cs.caller, &vsnap, &rsnap, &fn_names, &lsnap))
                     .unwrap_or(false);
                 if !arg_ok {
                     float_vars.get_mut(&cs.callee).unwrap().remove(pname);
@@ -408,22 +402,22 @@ pub fn analyze(prog: &Program) -> IntInfo {
 
         for f in &fns {
             if float_ret.contains(&f.name)
-                && !all_float_ret(f.body, &f.name, &vsnap, &rsnap, &fn_names, &lsnap)
+                && !all_fret(f.body, &f.name, &vsnap, &rsnap, &fn_names, &lsnap)
             {
                 float_ret.remove(&f.name);
                 changed = true;
             }
         }
 
-        // Float-list is the strict one: a var keeps the verdict only if it is
-        // never used in a way that could leak a non-float element, and every
-        // write (assignment, push, indexed store) is provably a float. A wrong
-        // "yes" here lets a backend read boxed values as raw f64 bits.
+        // Float-list is the strict one: a var keeps the verdict only if it never
+        // leaks a non-float element and every write (assign, push, indexed store)
+        // is provably a float. A wrong "yes" lets a backend read boxed values as
+        // raw f64 bits.
         for f in &fns {
             let facts = flist_facts.get(&f.name).unwrap();
             let mut assigns: Vec<(String, ValSrc)> = Vec::new();
             assignments(f.body, &mut assigns);
-            let cur = float_list_vars.get(&f.name).unwrap().clone();
+            let cur = flvars.get(&f.name).unwrap().clone();
             let mut to_drop: Vec<String> = Vec::new();
             for v in &cur {
                 // Any non-allowlisted use (escape, mixed op, etc.) disqualifies it.
@@ -437,7 +431,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                     .filter(|(name, _)| name == v)
                     .all(|(_, src)| match src {
                         ValSrc::Expr(e) => {
-                            flist_src_ok(e, &f.name, &vsnap, &rsnap, &fn_names, &lsnap)
+                            flist_ok(e, &f.name, &vsnap, &rsnap, &fn_names, &lsnap)
                         }
 
                         ValSrc::IntRange | ValSrc::NonInt => false,
@@ -451,7 +445,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                     .pushes
                     .iter()
                     .filter(|(name, _)| name == v)
-                    .all(|(_, arg)| expr_is_float(arg, &f.name, &vsnap, &rsnap, &fn_names, &lsnap));
+                    .all(|(_, arg)| is_fexpr(arg, &f.name, &vsnap, &rsnap, &fn_names, &lsnap));
                 if !pushes_ok {
                     to_drop.push(v.clone());
                     continue;
@@ -461,14 +455,14 @@ pub fn analyze(prog: &Program) -> IntInfo {
                     .index_stores
                     .iter()
                     .filter(|(name, _)| name == v)
-                    .all(|(_, val)| expr_is_float(val, &f.name, &vsnap, &rsnap, &fn_names, &lsnap));
+                    .all(|(_, val)| is_fexpr(val, &f.name, &vsnap, &rsnap, &fn_names, &lsnap));
                 if !stores_ok {
                     to_drop.push(v.clone());
                     continue;
                 }
             }
             if !to_drop.is_empty() {
-                let m = float_list_vars.get_mut(&f.name).unwrap();
+                let m = flvars.get_mut(&f.name).unwrap();
                 for v in to_drop {
                     m.remove(&v);
                     changed = true;
@@ -481,7 +475,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                 continue;
             };
             for (k, pname) in params.iter().enumerate() {
-                if !float_list_vars
+                if !flvars
                     .get(&cs.callee)
                     .map(|s| s.contains(pname))
                     .unwrap_or(false)
@@ -492,27 +486,27 @@ pub fn analyze(prog: &Program) -> IntInfo {
                     .args
                     .get(k)
                     .map(|a| {
-                        is_flist_val(a, &cs.caller, &lsnap, &float_list_ret, &fn_names)
+                        flist_val(a, &cs.caller, &lsnap, &flret, &fn_names)
                     })
                     .unwrap_or(false);
                 if !arg_ok {
-                    float_list_vars.get_mut(&cs.callee).unwrap().remove(pname);
+                    flvars.get_mut(&cs.callee).unwrap().remove(pname);
                     changed = true;
                 }
             }
         }
 
         for f in &fns {
-            if float_list_ret.contains(&f.name)
+            if flret.contains(&f.name)
                 && !returns_flist(
                     f.body,
                     &f.name,
-                    &float_list_vars,
-                    &float_list_ret,
+                    &flvars,
+                    &flret,
                     &fn_names,
                 )
             {
-                float_list_ret.remove(&f.name);
+                flret.remove(&f.name);
                 changed = true;
             }
         }
@@ -522,11 +516,11 @@ pub fn analyze(prog: &Program) -> IntInfo {
         }
     }
 
-    // A var proven to be an int-LIST is not a scalar int, even though the int
-    // fixpoint may have left a never-assigned list param in int_vars (params seed
-    // optimistically and only assignments disqualify). Strip them so codegen does
-    // not treat the list handle as a raw scalar when loading it for a[i].
-    for (fname, lvars) in &int_list_vars {
+    // An int-LIST var is not a scalar int, yet the int fixpoint may leave a
+    // never-assigned list param in int_vars (params seed optimistically; only
+    // assignments disqualify). Strip them so codegen does not treat the list
+    // handle as a raw scalar when loading it for a[i].
+    for (fname, lvars) in &ilvars {
         if let Some(ivars) = int_vars.get_mut(fname) {
             for v in lvars {
                 ivars.remove(v);
@@ -539,10 +533,10 @@ pub fn analyze(prog: &Program) -> IntInfo {
         int_ret,
         float_vars,
         float_ret,
-        float_list_vars,
-        float_list_ret,
-        int_list_vars,
-        int_list_ret,
+        flvars,
+        flret,
+        ilvars,
+        ilret,
     }
 }
 
@@ -554,7 +548,7 @@ enum ValSrc<'a> {
     NonInt,
 }
 
-fn val_is_int(
+fn val_int(
     src: &ValSrc,
     func: &str,
     vars: &HashMap<String, HashSet<String>>,
@@ -565,15 +559,14 @@ fn val_is_int(
     match src {
         ValSrc::IntRange => true,
         ValSrc::NonInt => false,
-        ValSrc::Expr(e) => expr_is_int(e, func, vars, ret, fns, ilist),
+        ValSrc::Expr(e) => is_iexpr(e, func, vars, ret, fns, ilist),
     }
 }
 
-// expr_is_int with int-list awareness: a[i] on a proven int-list var is an int.
-// The int-list verdict co-evolves with scalar-int in the same fixpoint loop, so
-// `ilist` is the in-progress int_list_vars snapshot. Conservative on every other
-// shape, matching the strictness the byte-identical contract requires.
-fn expr_is_int(
+// is_iexpr with int-list awareness: a[i] on a proven int-list var is an int.
+// The int-list verdict co-evolves with scalar-int in the same fixpoint, so
+// `ilist` is the in-progress ilvars snapshot. Conservative on every other shape.
+fn is_iexpr(
     e: &Expr,
     func: &str,
     vars: &HashMap<String, HashSet<String>>,
@@ -587,11 +580,11 @@ fn expr_is_int(
         Expr::Unary {
             op: UnOp::Neg,
             expr,
-        } => expr_is_int(expr, func, vars, ret, fns, ilist),
+        } => is_iexpr(expr, func, vars, ret, fns, ilist),
         Expr::Binary { op, lhs, rhs } => {
             int_arith(*op)
-                && expr_is_int(lhs, func, vars, ret, fns, ilist)
-                && expr_is_int(rhs, func, vars, ret, fns, ilist)
+                && is_iexpr(lhs, func, vars, ret, fns, ilist)
+                && is_iexpr(rhs, func, vars, ret, fns, ilist)
         }
         Expr::Call { callee, .. } => {
             matches!(&**callee, Expr::Ident(n) if fns.contains(n) && ret.contains(n))
@@ -611,7 +604,7 @@ fn int_arith(op: BinOp) -> bool {
     )
 }
 
-fn all_int_ret(
+fn all_iret(
     body: &[Stmt],
     func: &str,
     vars: &HashMap<String, HashSet<String>>,
@@ -625,7 +618,7 @@ fn all_int_ret(
         any = true;
         match e {
             Some(val) => {
-                if !expr_is_int(val, func, vars, ret, fns, ilist) {
+                if !is_iexpr(val, func, vars, ret, fns, ilist) {
                     ok = false;
                 }
             }
@@ -636,9 +629,8 @@ fn all_int_ret(
 }
 
 // flist_bad marks a var as "used in a way that may leak a non-float element":
-// any appearance that is not the narrow set of safe positions (indexing, len,
-// push) poisons the float-list verdict.
-fn val_is_float(
+// any appearance outside the safe positions (indexing, len, push) poisons it.
+fn val_float(
     src: &ValSrc,
     func: &str,
     vars: &HashMap<String, HashSet<String>>,
@@ -649,11 +641,11 @@ fn val_is_float(
     match src {
 
         ValSrc::IntRange | ValSrc::NonInt => false,
-        ValSrc::Expr(e) => expr_is_float(e, func, vars, ret, fns, flist),
+        ValSrc::Expr(e) => is_fexpr(e, func, vars, ret, fns, flist),
     }
 }
 
-fn expr_is_float(
+fn is_fexpr(
     e: &Expr,
     func: &str,
     vars: &HashMap<String, HashSet<String>>,
@@ -667,11 +659,11 @@ fn expr_is_float(
         Expr::Unary {
             op: UnOp::Neg,
             expr,
-        } => expr_is_float(expr, func, vars, ret, fns, flist),
+        } => is_fexpr(expr, func, vars, ret, fns, flist),
         Expr::Binary { op, lhs, rhs } => {
             float_arith(*op)
-                && expr_is_float(lhs, func, vars, ret, fns, flist)
-                && expr_is_float(rhs, func, vars, ret, fns, flist)
+                && is_fexpr(lhs, func, vars, ret, fns, flist)
+                && is_fexpr(rhs, func, vars, ret, fns, flist)
         }
         Expr::Call { callee, .. } => {
             matches!(&**callee, Expr::Ident(n) if fns.contains(n) && ret.contains(n))
@@ -824,23 +816,22 @@ fn flist_bad(e: &Expr, facts: &mut FlistFacts) {
     }
 }
 
-fn flist_visit_expr(e: &Expr, facts: &mut FlistFacts) {
+fn flist_visit(e: &Expr, facts: &mut FlistFacts) {
     match e {
 
         Expr::Index { obj, index } => {
             if let Expr::Ident(_) = &**obj {
 
-                flist_visit_expr(index, facts);
+                flist_visit(index, facts);
             } else {
-                flist_visit_expr(obj, facts);
-                flist_visit_expr(index, facts);
+                flist_visit(obj, facts);
+                flist_visit(index, facts);
             }
         }
 
         Expr::Method { obj, name, args } => {
             // Only len/push on a bare identifier are safe receivers. push args are
-            // recorded so the verdict loop can require them to be floats; anything
-            // else escapes the list and poisons it.
+            // recorded so the verdict loop can require floats; anything else poisons it.
             let receiver_safe =
                 matches!(&**obj, Expr::Ident(_)) && (name == "len" || name == "push");
             if receiver_safe {
@@ -854,7 +845,7 @@ fn flist_visit_expr(e: &Expr, facts: &mut FlistFacts) {
                 }
 
                 for a in args {
-                    flist_visit_expr(a, facts);
+                    flist_visit(a, facts);
                 }
             } else {
 
@@ -869,10 +860,10 @@ fn flist_visit_expr(e: &Expr, facts: &mut FlistFacts) {
             facts.bad_use.insert(n.clone());
         }
 
-        Expr::Unary { expr, .. } => flist_visit_expr(expr, facts),
+        Expr::Unary { expr, .. } => flist_visit(expr, facts),
         Expr::Binary { lhs, rhs, .. } => {
-            flist_visit_expr(lhs, facts);
-            flist_visit_expr(rhs, facts);
+            flist_visit(lhs, facts);
+            flist_visit(rhs, facts);
         }
         Expr::Call { callee, args } => {
             flist_bad(callee, facts);
@@ -944,30 +935,30 @@ fn flist_visit_expr(e: &Expr, facts: &mut FlistFacts) {
 fn flist_stmt(st: &Stmt, facts: &mut FlistFacts) {
     match st {
 
-        Stmt::Let { value, .. } => flist_visit_expr(value, facts),
+        Stmt::Let { value, .. } => flist_visit(value, facts),
         Stmt::Assign { target, value } => {
             match target {
 
                 Expr::Index { obj, index } => {
                     if let Expr::Ident(n) = &**obj {
                         facts.index_stores.push((n.clone(), value.clone()));
-                        flist_visit_expr(index, facts);
+                        flist_visit(index, facts);
                     } else {
-                        flist_visit_expr(obj, facts);
-                        flist_visit_expr(index, facts);
+                        flist_visit(obj, facts);
+                        flist_visit(index, facts);
                     }
-                    flist_visit_expr(value, facts);
+                    flist_visit(value, facts);
                 }
 
-                Expr::Ident(_) => flist_visit_expr(value, facts),
+                Expr::Ident(_) => flist_visit(value, facts),
 
                 other => {
-                    flist_visit_expr(other, facts);
-                    flist_visit_expr(value, facts);
+                    flist_visit(other, facts);
+                    flist_visit(value, facts);
                 }
             }
         }
-        Stmt::ExprStmt(e) => flist_visit_expr(e, facts),
+        Stmt::ExprStmt(e) => flist_visit(e, facts),
         Stmt::Return(Some(e)) => {
             // Returning a value lets it escape this function under an unknown
             // type, so any var in the returned expression is poisoned.
@@ -979,12 +970,12 @@ fn flist_stmt(st: &Stmt, facts: &mut FlistFacts) {
             elifs,
             els,
         } => {
-            flist_visit_expr(cond, facts);
+            flist_visit(cond, facts);
             for s in then {
                 flist_stmt(s, facts);
             }
             for (c, b) in elifs {
-                flist_visit_expr(c, facts);
+                flist_visit(c, facts);
                 for s in b {
                     flist_stmt(s, facts);
                 }
@@ -996,14 +987,14 @@ fn flist_stmt(st: &Stmt, facts: &mut FlistFacts) {
             }
         }
         Stmt::While { cond, body } => {
-            flist_visit_expr(cond, facts);
+            flist_visit(cond, facts);
             for s in body {
                 flist_stmt(s, facts);
             }
         }
         Stmt::For { iter, body, .. } => {
 
-            flist_visit_expr(iter, facts);
+            flist_visit(iter, facts);
             for s in body {
                 flist_stmt(s, facts);
             }
@@ -1018,12 +1009,12 @@ fn flist_stmt(st: &Stmt, facts: &mut FlistFacts) {
                 flist_stmt(s, facts);
             }
         }
-        Stmt::Raise(e) => flist_visit_expr(e, facts),
+        Stmt::Raise(e) => flist_visit(e, facts),
         _ => {}
     }
 }
 
-fn flist_src_ok(
+fn flist_ok(
     e: &Expr,
     func: &str,
     fvars: &HashMap<String, HashSet<String>>,
@@ -1034,11 +1025,11 @@ fn flist_src_ok(
     match e {
         Expr::List(elems) => elems
             .iter()
-            .all(|el| expr_is_float(el, func, fvars, fret, fns, flist)),
+            .all(|el| is_fexpr(el, func, fvars, fret, fns, flist)),
         Expr::ListComp { elem, var, .. } => {
 
             let _ = var;
-            expr_is_float(elem, func, fvars, fret, fns, flist)
+            is_fexpr(elem, func, fvars, fret, fns, flist)
         }
         Expr::Ident(n) => flist.get(func).is_some_and(|s| s.contains(n)),
         Expr::Call { callee, .. } => {
@@ -1048,8 +1039,8 @@ fn flist_src_ok(
     }
 }
 
-// Int analogue of flist_src_ok: an assignment RHS that produces a valid int-list.
-fn ilist_src_ok(
+// Int analogue of flist_ok: an assignment RHS that produces a valid int-list.
+fn ilist_ok(
     e: &Expr,
     func: &str,
     ivars: &HashMap<String, HashSet<String>>,
@@ -1060,10 +1051,10 @@ fn ilist_src_ok(
     match e {
         Expr::List(elems) => elems
             .iter()
-            .all(|el| expr_is_int(el, func, ivars, iret, fns, ilist)),
+            .all(|el| is_iexpr(el, func, ivars, iret, fns, ilist)),
         Expr::ListComp { elem, var, .. } => {
             let _ = var;
-            expr_is_int(elem, func, ivars, iret, fns, ilist)
+            is_iexpr(elem, func, ivars, iret, fns, ilist)
         }
         Expr::Ident(n) => ilist.get(func).is_some_and(|s| s.contains(n)),
         Expr::Call { callee, .. } => {
@@ -1075,7 +1066,7 @@ fn ilist_src_ok(
     }
 }
 
-fn is_flist_val(
+fn flist_val(
     e: &Expr,
     caller: &str,
     flist: &HashMap<String, HashSet<String>>,
@@ -1104,7 +1095,7 @@ fn returns_flist(
         any = true;
         match e {
             Some(val) => {
-                if !is_flist_val(val, func, flist, flist_ret, fns) {
+                if !flist_val(val, func, flist, flist_ret, fns) {
                     ok = false;
                 }
             }
@@ -1114,10 +1105,9 @@ fn returns_flist(
     ok && any && matches!(body.last(), Some(Stmt::Return(_)))
 }
 
-// Int-list analogues of is_flist_val / returns_flist. Identical shape; the
-// element-type guarantee is enforced at the writes (expr_is_int), here we only
-// track which expressions yield an already-proven int-list.
-fn is_ilist_val(
+// Int-list analogues of flist_val / returns_flist. Element type is enforced at
+// the writes (is_iexpr); here we only track expressions yielding a proven int-list.
+fn ilist_val(
     e: &Expr,
     caller: &str,
     ilist: &HashMap<String, HashSet<String>>,
@@ -1146,7 +1136,7 @@ fn returns_ilist(
         any = true;
         match e {
             Some(val) => {
-                if !is_ilist_val(val, func, ilist, ilist_ret, fns) {
+                if !ilist_val(val, func, ilist, ilist_ret, fns) {
                     ok = false;
                 }
             }
@@ -1156,7 +1146,7 @@ fn returns_ilist(
     ok && any && matches!(body.last(), Some(Stmt::Return(_)))
 }
 
-fn all_float_ret(
+fn all_fret(
     body: &[Stmt],
     func: &str,
     vars: &HashMap<String, HashSet<String>>,
@@ -1170,7 +1160,7 @@ fn all_float_ret(
         any = true;
         match e {
             Some(val) => {
-                if !expr_is_float(val, func, vars, ret, fns, flist) {
+                if !is_fexpr(val, func, vars, ret, fns, flist) {
                     ok = false;
                 }
             }
@@ -1207,7 +1197,7 @@ fn walk_returns(body: &[Stmt], f: &mut dyn FnMut(&Option<Expr>)) {
     }
 }
 
-fn seed_assigned_vars(body: &[Stmt], out: &mut HashSet<String>) {
+fn seed_vars(body: &[Stmt], out: &mut HashSet<String>) {
     for st in body {
         match st {
             Stmt::Let { name, .. } => {
@@ -1222,27 +1212,27 @@ fn seed_assigned_vars(body: &[Stmt], out: &mut HashSet<String>) {
             Stmt::If {
                 then, elifs, els, ..
             } => {
-                seed_assigned_vars(then, out);
+                seed_vars(then, out);
                 for (_, b) in elifs {
-                    seed_assigned_vars(b, out);
+                    seed_vars(b, out);
                 }
                 if let Some(b) = els {
-                    seed_assigned_vars(b, out);
+                    seed_vars(b, out);
                 }
             }
-            Stmt::While { body, .. } => seed_assigned_vars(body, out),
+            Stmt::While { body, .. } => seed_vars(body, out),
             Stmt::For { var, body, .. } => {
                 out.insert(var.clone());
-                seed_assigned_vars(body, out);
+                seed_vars(body, out);
             }
             Stmt::Try {
                 body,
                 catch_var,
                 catch_body,
             } => {
-                seed_assigned_vars(body, out);
+                seed_vars(body, out);
                 out.insert(catch_var.clone());
-                seed_assigned_vars(catch_body, out);
+                seed_vars(catch_body, out);
             }
             _ => {}
         }
@@ -1298,9 +1288,8 @@ fn assignments<'a>(body: &'a [Stmt], out: &mut Vec<(String, ValSrc<'a>)>) {
     }
 }
 
-// Functions whose name is used as a value (passed as an arg, captured by a
-// closure, etc.) rather than directly called. Such functions can be invoked
-// with arbitrary args we cannot see, so their typed-param assumptions are unsound.
+// Functions whose name is used as a value (arg, closure capture) not directly
+// called: callable with unseen args, so their typed-param assumptions are unsound.
 fn escaped_fns(fns: &[FnView], fn_names: &HashSet<String>) -> HashSet<String> {
     let mut escaped: HashSet<String> = HashSet::new();
     fn ve(e: &Expr, fn_names: &HashSet<String>, out: &mut HashSet<String>) {
@@ -1464,7 +1453,7 @@ fn escaped_fns(fns: &[FnView], fn_names: &HashSet<String>) -> HashSet<String> {
     escaped
 }
 
-fn collect_fn_refs(body: &[Stmt], fn_names: &HashSet<String>, out: &mut HashSet<String>) {
+fn fn_refs(body: &[Stmt], fn_names: &HashSet<String>, out: &mut HashSet<String>) {
     fn ve(e: &Expr, fn_names: &HashSet<String>, out: &mut HashSet<String>) {
         match e {
             Expr::Ident(n) => {
@@ -1776,7 +1765,7 @@ mod tests {
     fn fib_int() {
         let src = "fn fib(n):\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nfn main():\n    print(fib(10))\n";
         let i = info(src);
-        assert!(i.is_int_var("fib", "n"), "n should be proven int");
+        assert!(i.is_ivar("fib", "n"), "n should be proven int");
         assert!(
             i.int_ret.contains("fib"),
             "fib should be proven int-returning"
@@ -1784,42 +1773,42 @@ mod tests {
     }
 
     #[test]
-    fn mixed_not_int() {
+    fn mixed_notint() {
 
         let src =
             "fn dbl(x):\n    return x + x\nfn main():\n    print(dbl(1))\n    print(dbl(1.5))\n";
         let i = info(src);
         assert!(
-            !i.is_int_var("dbl", "x"),
+            !i.is_ivar("dbl", "x"),
             "x must not be typed int (float arg)"
         );
     }
 
     #[test]
-    fn reassigned_not_int() {
+    fn reasn_notint() {
         let src = "fn main():\n    let v = 10\n    v = 2.5\n    print(v)\n";
         let i = info(src);
         assert!(
-            !i.is_int_var("main", "v"),
+            !i.is_ivar("main", "v"),
             "v reassigned to float must not be int"
         );
     }
 
     #[test]
-    fn pure_int_local() {
+    fn pure_ilocal() {
         let src = "fn main():\n    let a = 5\n    let b = a + 3\n    print(b)\n";
         let i = info(src);
-        assert!(i.is_int_var("main", "a"));
-        assert!(i.is_int_var("main", "b"));
+        assert!(i.is_ivar("main", "a"));
+        assert!(i.is_ivar("main", "b"));
     }
 
     #[test]
-    fn comp_not_int() {
+    fn comp_notint() {
 
         let src = "fn dbl(x):\n    return x * 2\nfn main():\n    print([dbl(c) for c in \"ab\"])\n";
         let i = info(src);
         assert!(
-            !i.is_int_var("dbl", "x"),
+            !i.is_ivar("dbl", "x"),
             "x must not be int: only call site is dbl(c) over a string"
         );
     }
@@ -1831,18 +1820,18 @@ mod tests {
     }
 
     #[test]
-    fn escaped_not_int() {
+    fn esc_notint() {
 
         let src = "fn inc(x):\n    return x + 1\nfn apply(f, v):\n    return f(v)\nfn main():\n    print(apply(inc, 5))\n";
         let i = info_lifted(src);
         assert!(
-            !i.is_int_var("inc", "x"),
+            !i.is_ivar("inc", "x"),
             "inc escapes as a value -> its param must not be proven int"
         );
     }
 
     #[test]
-    fn captured_cell_not_int() {
+    fn cap_notint() {
 
         let src = "fn make_rng(seed):\n    let state = seed\n    return fn():\n        state = state + 1\n        return state\nfn main():\n    let r = make_rng(0)\n    print(r())\n";
         let i = info_lifted(src);
@@ -1857,12 +1846,12 @@ mod tests {
     }
 
     #[test]
-    fn method_not_int() {
+    fn meth_notint() {
 
         let src = "fn helper(x):\n    return x + 1\nstruct S:\n    v: int\nimpl S:\n    fn go(self):\n        return helper(self.v)\nfn main():\n    let s = S(v: 3)\n    print(s.go())\n";
         let i = info_lifted(src);
         assert!(
-            !i.is_int_var("helper", "x"),
+            !i.is_ivar("helper", "x"),
             "helper is reached only from a method body -> param must not be int"
         );
     }

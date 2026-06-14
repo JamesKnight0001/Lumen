@@ -1,7 +1,7 @@
 # Values and types
 
-Lumen is dynamically typed: variables don't carry type annotations, the values
-do. There are seven kinds of value, and that's the whole list.
+Lumen is dynamically typed: type belongs to the value, not the variable. There
+are seven kinds of value.
 
 | Kind | Looks like | `type(x)` gives |
 |------|-----------|-----------------|
@@ -14,13 +14,11 @@ do. There are seven kinds of value, and that's the whole list.
 | struct | `Point(x: 1, y: 2)` | `"struct"` |
 | nil | `nil` | `"nil"` |
 
-`type(v)` hands back the type name as a string. It's handy for dispatch and for
-the kind of debugging where you just need to know what you're holding.
+`type(v)` returns the type name as a string. Handy for dispatch and debugging.
 
 ## Numbers: integers vs floats
 
-Integer arithmetic stays integer, and `/` is integer division. Worth pausing on
-that:
+Integer arithmetic stays integer, and `/` is integer division:
 
 ```lumen
 print(7 / 2)        # 3      (integer division - the remainder is dropped)
@@ -29,9 +27,8 @@ print(7.0 / 2.0)    # 3.5    (any float operand makes the whole thing float)
 print(2 + 3.0)      # 5.0    (mixing promotes to float)
 ```
 
-The arithmetic operators are `+ - * / %` and `**` (exponent). A couple of things
-about `**` are easy to trip on: it's right-associative, and it binds tighter than
-`* / %`:
+The arithmetic operators are `+ - * / %` and `**` (exponent). Two things about
+`**` trip people up: it's right-associative, and it binds tighter than `* / %`:
 
 ```lumen
 print(2 ** 3 ** 2)  # 512    (right-associative: 2 ** (3 ** 2))
@@ -44,26 +41,26 @@ print(2 ** -1)      # 0.5    (negative exponent, or any float, gives a float)
 
 Because every value packs into one 64-bit word (see
 [how memory works](../lumen/memory.md)), integers use a 48-bit two's-complement
-payload, the range `[-140737488355328, 140737488355327]`, i.e. `[-2⁴⁷, 2⁴⁷−1]`.
-Arithmetic that overflows that range **wraps around** rather than trapping, and
-it wraps identically in the interpreter and the compiled binary (so `max + 1 == min`
-in both, which is exactly the property you want). Within range, integers are
-exact. Need bigger magnitudes? Reach for floats.
+payload: the range `[-140737488355328, 140737488355327]`, i.e. `[-2⁴⁷, 2⁴⁷−1]`.
+Overflowing that range **wraps around** rather than trapping, and it wraps
+identically in the interpreter and the compiled binary (so `max + 1 == min` in
+both). Within range, integers are exact. Need bigger magnitudes? Reach for
+floats.
 
 ## Booleans and nil
 
-`true` and `false` are the booleans. `nil` is the "no value" value: it's what
-functions hand back when they don't `return` anything, and what a failing
+`true` and `false` are the booleans. `nil` is the "no value" value: what
+functions return when they don't `return` anything, and what a failing
 standard-library lookup gives you.
 
 Lumen has **strict truthiness**. Anywhere a condition is expected (`if`, `while`,
-the ternary, `and`/`or` operands), the value has to be an actual bool. `if 5:` is
-an error, not a shortcut for "5 is truthy." Write the comparison you actually
-mean: `if n != 0:`, `if name != nil:`. It's a small cost up front, and it rules
-out a whole class of bugs in return.
+the ternary, `and`/`or` operands), the value must be an actual bool. `if 5:` is
+an error, not a shortcut for "5 is truthy." Write the comparison you mean:
+`if n != 0:`, `if name != nil:`. A small cost up front that rules out a whole
+class of bugs.
 
 Combine booleans with `and`, `or`, and `not`. They require bool operands too, per
-that same strict-truthiness rule:
+the same rule:
 
 ```lumen
 print(true and false)   # false
@@ -75,10 +72,9 @@ if 0 <= i and i < len(xs):
 
 ## Equality and comparison
 
-`==` and `!=` test value equality, and they work across int and float. The
-ordering operators `< <= > >=` work on numbers and strings. Strings compare
-lexicographically, byte by byte, so `"apple" < "banana"`, and uppercase sorts
-before lowercase:
+`==` and `!=` test value equality across int and float. The ordering operators
+`< <= > >=` work on numbers and strings. Strings compare lexicographically, byte
+by byte, so `"apple" < "banana"`, and uppercase sorts before lowercase:
 
 ```lumen
 print(1 == 1.0)         # true
@@ -87,7 +83,7 @@ print("Dog" < "dog")    # true   (uppercase 'D' sorts before lowercase 'd')
 
 ## Membership: `in` / `not in`
 
-`x in container` returns a bool, and it means the natural thing for each type:
+`x in container` returns a bool and means the natural thing for each type:
 
 ```lumen
 print(3 in [1, 2, 3])     # true   (element of a list, by value)
@@ -98,8 +94,8 @@ print(9 not in [1, 2, 3]) # true
 
 ## Trailing commas are fine
 
-Lists, maps, call arguments, and parameter lists all allow a trailing comma. It's
-a small thing, but it keeps your diffs clean:
+Lists, maps, call arguments, and parameter lists all allow a trailing comma. It
+keeps your diffs clean:
 
 ```lumen
 let xs = [

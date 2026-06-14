@@ -122,10 +122,18 @@ typedef struct {
     LumenVal *caps;
 } LumenFunc;
 
-static inline int lumen_is_double(LumenVal v) { return (v & QNAN) != QNAN; }
-static inline int lumen_is_boxed(LumenVal v)  { return (v & QNAN) == QNAN; }
+// A hardware NaN has all QNAN bits set, which collides with the "boxed value"
+// tag space (boxed == (v & QNAN) == QNAN). Legit boxed values always carry a
+// nonzero tag (int/bool/nil) or the SIGN bit (pointers), so the one QNAN pattern
+// with tag==0 and SIGN==0 is free - we reserve it as the canonical NaN and treat
+// it as a real double. lumen_from_double folds every NaN onto it so NaN results
+// (log/sqrt of a negative, 0.0/0.0, ...) round-trip as doubles, matching interp.
+#define LUMEN_CANON_NAN 0x7FF8000000000000ULL
+static inline int is_double(LumenVal v) { return (v & QNAN) != QNAN; }
+static inline int is_boxed(LumenVal v)  { return (v & QNAN) == QNAN; }
 
 LumenVal lumen_from_double(double d) {
+    if (d != d) return LUMEN_CANON_NAN; // canonicalize every NaN
     LumenVal v;
     memcpy(&v, &d, 8);
     return v;
@@ -162,12 +170,18 @@ static void *unbox_ptr(LumenVal v) {
 
 static int tag_of(LumenVal v) { return (int)((v >> TAG_SHIFT) & 0x7); }
 
-int lumen_is_int(LumenVal v)   { return lumen_is_boxed(v) && !(v & SIGN) && tag_of(v) == TAG_INT; }
-int lumen_is_bool(LumenVal v)  { return lumen_is_boxed(v) && !(v & SIGN) && tag_of(v) == TAG_BOOL; }
-int lumen_is_nil(LumenVal v)   { return lumen_is_boxed(v) && !(v & SIGN) && tag_of(v) == TAG_NIL; }
-int lumen_is_ptr(LumenVal v)   { return lumen_is_boxed(v) && (v & SIGN); }
+int is_int(LumenVal v)   { return is_boxed(v) && !(v & SIGN) && tag_of(v) == TAG_INT; }
+int lumen_is_bool(LumenVal v)  { return is_boxed(v) && !(v & SIGN) && tag_of(v) == TAG_BOOL; }
+int lumen_is_nil(LumenVal v)   { return is_boxed(v) && !(v & SIGN) && tag_of(v) == TAG_NIL; }
+int lumen_is_ptr(LumenVal v)   { return is_boxed(v) && (v & SIGN); }
 
-uint32_t lumen_current_line = 0;
+// volatile so the line update can't be reordered/elided across the custom
+// setjmp/longjmp. noinline so LTO can't inline it into a caller (which would
+// turn the call into a reorderable store and scramble the reported fault line).
+volatile uint32_t lumen_current_line = 0;
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
 void lumen_set_line(uint32_t n) { lumen_current_line = n; }
 
 #include <stdint.h>
@@ -175,6 +189,8 @@ void lumen_set_line(uint32_t n) { lumen_current_line = n; }
 typedef struct { void *slot[8]; } LumenJmp;
 static LumenJmp lumen_try_stack[LUMEN_TRY_MAX];
 static int lumen_try_depth = 0;
+static int lumen_try_arena[LUMEN_TRY_MAX]; // arena frame depth at each try entry
+static int arena_depth;                    // current arena frame depth (defined below)
 static char lumen_err_buf[512];
 
 LumenVal lumen_str_new(const char *cstr);
@@ -230,11 +246,20 @@ __attribute__((naked, noinline, noreturn)) void lumen_longjmp(LumenJmp *buf __at
 
 LumenJmp *lumen_try_push(void) {
     if (lumen_try_depth >= LUMEN_TRY_MAX) return NULL;
+    lumen_try_arena[lumen_try_depth] = arena_depth; // remember arena frame for unwind
     return &lumen_try_stack[lumen_try_depth++];
 }
 
 void lumen_try_pop(void) {
     if (lumen_try_depth > 0) lumen_try_depth--;
+}
+
+// On a caught exception the stack unwinds via longjmp, skipping the normal
+// lumen_arena_reset at each intervening function's return. Roll the arena back
+// to where the catching try began so those frames' objects are bulk-freed.
+void lumen_try_unwind_arena(void) {
+    extern void lumen_arena_reset(int64_t);
+    lumen_arena_reset((int64_t)lumen_try_arena[lumen_try_depth]);
 }
 
 LumenVal lumen_caught_msg(void) { return lumen_str_new(lumen_err_buf); }
@@ -308,7 +333,7 @@ static void **gc_set = NULL;
 static size_t gc_set_cap = 0;
 static size_t gc_set_len = 0;
 
-static inline size_t gc_hash_ptr(void *p) {
+static inline size_t gc_hash(void *p) {
 
     uint64_t x = (uint64_t)(uintptr_t)p;
     x *= 0x9E3779B97F4A7C15ull;
@@ -316,9 +341,9 @@ static inline size_t gc_hash_ptr(void *p) {
 }
 
 // adds a pointer to a hashset if it isn't already present.
-static void gc_set_insert_raw(void **tbl, size_t cap, void *p) {
+static void gcset_insert(void **tbl, size_t cap, void *p) {
     size_t mask = cap - 1;
-    size_t i = gc_hash_ptr(p) & mask;
+    size_t i = gc_hash(p) & mask;
     while (tbl[i]) {
         if (tbl[i] == p) return;
         i = (i + 1) & mask;
@@ -327,35 +352,35 @@ static void gc_set_insert_raw(void **tbl, size_t cap, void *p) {
 }
 
 
-static void gc_set_grow(size_t want) {
+static void gcset_grow(size_t want) {
     size_t cap = gc_set_cap ? gc_set_cap : 512;
     while (cap < want * 2) cap *= 2;
     if (cap == gc_set_cap) return;
     void **tbl = calloc(cap, sizeof(void *));
     if (!tbl) { fprintf(stderr, "lumen: gc set oom\n"); exit(1); }
     for (size_t i = 0; i < gc_set_cap; i++)
-        if (gc_set[i]) gc_set_insert_raw(tbl, cap, gc_set[i]);
+        if (gc_set[i]) gcset_insert(tbl, cap, gc_set[i]);
     free(gc_set);
     gc_set = tbl;
     gc_set_cap = cap;
 }
 
-static void gc_set_add(void *p) {
-    if ((gc_set_len + 1) * 2 >= gc_set_cap) gc_set_grow(gc_set_len + 1);
+static void gcset_add(void *p) {
+    if ((gc_set_len + 1) * 2 >= gc_set_cap) gcset_grow(gc_set_len + 1);
     size_t before = gc_set_len;
 
     size_t mask = gc_set_cap - 1;
-    size_t i = gc_hash_ptr(p) & mask;
+    size_t i = gc_hash(p) & mask;
     while (gc_set[i]) { if (gc_set[i] == p) return; i = (i + 1) & mask; }
     gc_set[i] = p;
     gc_set_len = before + 1;
 }
 
-static void gc_set_rebuild(void) {
+static void gcset_rebuild(void) {
     if (gc_set_cap) memset(gc_set, 0, gc_set_cap * sizeof(void *));
     gc_set_len = 0;
-    if (gc_count * 2 >= gc_set_cap) gc_set_grow(gc_count);
-    for (size_t i = 0; i < gc_count; i++) gc_set_add(gc_objects[i]);
+    if (gc_count * 2 >= gc_set_cap) gcset_grow(gc_count);
+    for (size_t i = 0; i < gc_count; i++) gcset_add(gc_objects[i]);
 }
 
 static void gc_register(void *o) {
@@ -365,13 +390,117 @@ static void gc_register(void *o) {
         if (!gc_objects) { fprintf(stderr, "lumen: gc oom\n"); exit(1); }
     }
     gc_objects[gc_count++] = o;
-    gc_set_add(o);
+    gcset_add(o);
 }
 
-static int gc_is_object(void *p) {
+// ───────────────────────── arena (escape-analysis allocations) ─────────────
+// Objects the compiler proved cannot escape their function are bump-allocated
+// here instead of on the GC heap, and freed wholesale when the function returns
+// (or unwinds). They are NEVER gc_register'd, so the sweep never frees them
+// individually; the collector instead treats every live arena object's direct
+// referents as roots (arena_roots) so heap objects they uniquely hold stay
+// alive across a mid-function collection. Arena chunks never move, so pointers
+// into them stay valid for the object's whole (scope-bounded) lifetime.
+#define ARENA_CHUNK (64 * 1024)
+#define ARENA_RC (-1)   // sentinel rc marking an arena (non-GC) object
+static void gc_markval(LumenVal v); // defined with the GC, used by arena roots
+typedef struct ArenaChunk { struct ArenaChunk *next; size_t used, cap; char *base; } ArenaChunk;
+static ArenaChunk *arena_head = NULL;   // current chunk
+static void **arena_objs = NULL;        // every live arena object pointer
+static size_t arena_objs_len = 0, arena_objs_cap = 0;
+static int arena_enabled = 1;
+
+// A frame remembers where the arena was when a function entered, so reset frees
+// exactly what that function (and its callees that already returned) allocated.
+typedef struct { ArenaChunk *chunk; size_t used; size_t objs_len; } ArenaFrame;
+static ArenaFrame arena_frames[4096];
+static int arena_depth = 0;
+
+static ArenaChunk *arena_new_chunk(size_t need) {
+    size_t cap = need > ARENA_CHUNK ? need : ARENA_CHUNK;
+    ArenaChunk *c = malloc(sizeof(ArenaChunk));
+    if (!c) { fprintf(stderr, "lumen: arena oom\n"); exit(1); }
+    c->base = malloc(cap);
+    if (!c->base) { fprintf(stderr, "lumen: arena oom\n"); exit(1); }
+    c->used = 0; c->cap = cap; c->next = arena_head;
+    arena_head = c;
+    return c;
+}
+
+static void *arena_alloc(size_t n) {
+    n = (n + 15) & ~(size_t)15;                 // 16-byte align
+    if (!arena_head || arena_head->used + n > arena_head->cap) arena_new_chunk(n);
+    void *p = arena_head->base + arena_head->used;
+    arena_head->used += n;
+    memset(p, 0, n);                            // GC reads kind/mark; zero like calloc
+    return p;
+}
+
+static void arena_track(void *o) {
+    if (arena_objs_len == arena_objs_cap) {
+        arena_objs_cap = arena_objs_cap ? arena_objs_cap * 2 : 256;
+        arena_objs = realloc(arena_objs, arena_objs_cap * sizeof(void *));
+        if (!arena_objs) { fprintf(stderr, "lumen: arena oom\n"); exit(1); }
+    }
+    arena_objs[arena_objs_len++] = o;
+}
+
+// Is p inside any live arena chunk? Used to (a) skip arena objects in the heap
+// sweep/release and (b) route in-place growth to the arena.
+static int arena_in(void *p) {
+    for (ArenaChunk *c = arena_head; c; c = c->next)
+        if ((char *)p >= c->base && (char *)p < c->base + c->used) return 1;
+    return 0;
+}
+
+// Save the arena position on function entry. Returns a frame depth token.
+int64_t lumen_arena_mark(void) {
+    if (!arena_enabled || arena_depth >= 4095) return -1;
+    ArenaFrame *f = &arena_frames[arena_depth];
+    f->chunk = arena_head;
+    f->used = arena_head ? arena_head->used : 0;
+    f->objs_len = arena_objs_len;
+    return arena_depth++;
+}
+
+// Free everything allocated since the matching mark. Frees whole chunks newer
+// than the marked one and rewinds the bump pointer + object list.
+void lumen_arena_reset(int64_t tok) {
+    if (tok < 0) return;
+    arena_depth = (int)tok;                     // pop this frame and any leaked above it
+    ArenaFrame *f = &arena_frames[tok];
+    while (arena_head && arena_head != f->chunk) {
+        ArenaChunk *c = arena_head; arena_head = c->next;
+        free(c->base); free(c);
+    }
+    if (arena_head) arena_head->used = f->used;
+    arena_objs_len = f->objs_len;
+}
+
+// Mark phase hook: every live arena object's direct referents are roots, so the
+// heap objects an arena object uniquely holds survive a mid-function collection.
+// We do NOT recurse into arena objects here (they aren't gc_objects); iterating
+// the full arena_objs list covers arena->arena->heap chains, and gc_markval
+// already skips non-heap pointers, so this is cycle-safe.
+static void arena_roots(void) {
+    for (size_t i = 0; i < arena_objs_len; i++) {
+        LumenObj *o = (LumenObj *)arena_objs[i];
+        switch (o->kind) {
+            case OBJ_LIST: { LumenList *l = (LumenList *)o;
+                for (size_t k = 0; k < l->len; k++) gc_markval(l->items[k]); break; }
+            case OBJ_MAP: { LumenMap *m = (LumenMap *)o;
+                for (size_t k = 0; k < m->len; k++) { gc_markval(m->keys[k]); gc_markval(m->vals[k]); } break; }
+            case OBJ_STRUCT: { LumenStruct *s = (LumenStruct *)o;
+                for (size_t k = 0; k < s->nfields; k++) gc_markval(s->field_vals[k]); break; }
+            default: break;
+        }
+    }
+}
+
+static int gc_isobj(void *p) {
     if (!gc_set_cap) return 0;
     size_t mask = gc_set_cap - 1;
-    size_t i = gc_hash_ptr(p) & mask;
+    size_t i = gc_hash(p) & mask;
     while (gc_set[i]) {
         if (gc_set[i] == p) return 1;
         i = (i + 1) & mask;
@@ -379,46 +508,46 @@ static int gc_is_object(void *p) {
     return 0;
 }
 
-static void gc_mark_val(LumenVal v);
+static void gc_markval(LumenVal v);
 
-static void gc_mark_obj(void *p) {
+static void gc_markobj(void *p) {
     LumenObj *o = (LumenObj *)p;
     if (o->gc_mark) return;
     o->gc_mark = 1;
     switch (o->kind) {
         case OBJ_LIST: {
             LumenList *l = (LumenList *)o;
-            for (size_t i = 0; i < l->len; i++) gc_mark_val(l->items[i]);
+            for (size_t i = 0; i < l->len; i++) gc_markval(l->items[i]);
             break;
         }
         case OBJ_MAP: {
             LumenMap *m = (LumenMap *)o;
-            for (size_t i = 0; i < m->len; i++) { gc_mark_val(m->keys[i]); gc_mark_val(m->vals[i]); }
+            for (size_t i = 0; i < m->len; i++) { gc_markval(m->keys[i]); gc_markval(m->vals[i]); }
             break;
         }
         case OBJ_STRUCT: {
             LumenStruct *s = (LumenStruct *)o;
-            for (size_t i = 0; i < s->nfields; i++) gc_mark_val(s->field_vals[i]);
+            for (size_t i = 0; i < s->nfields; i++) gc_markval(s->field_vals[i]);
             break;
         }
         case OBJ_FUNC: {
 
             LumenFunc *f = (LumenFunc *)o;
-            for (int i = 0; i < f->ncap; i++) gc_mark_val(f->caps[i]);
+            for (int i = 0; i < f->ncap; i++) gc_markval(f->caps[i]);
             break;
         }
         default: break;
     }
 }
 
-static void gc_mark_val(LumenVal v) {
+static void gc_markval(LumenVal v) {
     if (lumen_is_ptr(v)) {
         void *p = unbox_ptr(v);
-        if (gc_is_object(p)) gc_mark_obj(p);
+        if (gc_isobj(p)) gc_markobj(p);
     }
 }
 
-static void gc_scan_range(void *lo, void *hi) {
+static void gc_scan(void *lo, void *hi) {
     uintptr_t a = (uintptr_t)lo, b = (uintptr_t)hi;
     // Conservative scan: walk the stack range one aligned word at a time and mark
     // any word that both looks NaN-boxed and is a registered object. We never move
@@ -432,12 +561,12 @@ static void gc_scan_range(void *lo, void *hi) {
         LumenVal w = *p;
         if (lumen_is_ptr(w)) {
             void *obj = unbox_ptr(w);
-            if (gc_is_object(obj)) gc_mark_obj(obj);
+            if (gc_isobj(obj)) gc_markobj(obj);
         }
     }
 }
 
-static void gc_free_obj(LumenObj *o) {
+static void gc_free(LumenObj *o) {
     switch (o->kind) {
         case OBJ_STR:    xfree(((LumenStr *)o)->data); break;
         case OBJ_LIST:   xfree(((LumenList *)o)->items); break;
@@ -457,6 +586,13 @@ void lumen_gc_collect(void) {
     // Amortize: only collect once enough has been allocated since the last run.
     if (lumen_allocs_since_gc < 512) return;
     lumen_allocs_since_gc = 0;
+
+    // Roots are found by conservatively scanning the live C stack. At -O1+ a
+    // live LumenVal can sit in a callee-saved register instead of a stack slot,
+    // where a plain stack scan can't see it -> use-after-free. __builtin_unwind_init
+    // spills all callee-saved registers into the current frame; taking stack_top
+    // AFTER it means those spills fall inside the scanned [lo, hi) range.
+    __builtin_unwind_init();
     volatile void *probe = NULL;
     void *stack_top = (void *)&probe;
     void *lo = stack_top, *hi = gc_stack_bottom;
@@ -468,7 +604,8 @@ void lumen_gc_collect(void) {
 
     for (size_t i = 0; i < gc_count; i++) ((LumenObj *)gc_objects[i])->gc_mark = 0;
 
-    gc_scan_range(lo, hi);
+    gc_scan(lo, hi);
+    arena_roots(); // keep heap objects that only an arena object references
 
     if (major) {
         // Sweep the entire object array, compacting survivors down. Everything
@@ -477,7 +614,7 @@ void lumen_gc_collect(void) {
         for (size_t i = 0; i < gc_count; i++) {
             LumenObj *o = (LumenObj *)gc_objects[i];
             if (o->gc_mark) gc_objects[w++] = o;
-            else gc_free_obj(o);
+            else gc_free(o);
         }
         gc_count = w;
         gc_old = w;
@@ -489,13 +626,13 @@ void lumen_gc_collect(void) {
         for (size_t i = gc_old; i < gc_count; i++) {
             LumenObj *o = (LumenObj *)gc_objects[i];
             if (o->gc_mark) gc_objects[w++] = o;
-            else gc_free_obj(o);
+            else gc_free(o);
         }
         gc_count = w;
         gc_old = w;
     }
 
-    gc_set_rebuild();
+    gcset_rebuild();
 }
 
 void lumen_gc_report(void) {
@@ -508,6 +645,8 @@ void lumen_gc_init(void *stack_bottom) {
     gc_enabled = 1;
     const char *e = getenv("LUMEN_GC");
     if (e && e[0] == '1') atexit(lumen_gc_report);
+    if (e && e[0] == '0') gc_enabled = 0; // LUMEN_GC=0 disables collection (diag)
+    if (getenv("LUMEN_NO_ARENA")) arena_enabled = 0; // force all allocs to the heap (diag)
 }
 
 void lumen_release(LumenVal v);
@@ -521,6 +660,7 @@ void lumen_retain(LumenVal v) {
 void lumen_release(LumenVal v) {
     if (!lumen_is_ptr(v)) return;
     LumenObj *o = (LumenObj *)unbox_ptr(v);
+    if (o->rc == ARENA_RC) return; // arena objects are freed by frame reset, never here
     if (--o->rc > 0) return;
     switch (o->kind) {
         case OBJ_STR:
@@ -591,12 +731,34 @@ LumenVal lumen_list_new(int64_t n) {
     l->items = xalloc(l->cap * sizeof(LumenVal));
     return box_ptr(l);
 }
+// Arena variant: same layout, bump-allocated, not GC-tracked. Its items buffer
+// also lives in the arena. rc is set to ARENA_RC (-1) to flag an arena object so
+// list_push / map_set grow via the arena instead of heap realloc. cap stays a
+// plain capacity (no readers elsewhere need adjusting).
+LumenVal lumen_list_new_arena(int64_t n) {
+    if (!arena_enabled) return lumen_list_new(n);
+    LumenList *l = arena_alloc(sizeof(LumenList));
+    arena_track(l);
+    l->kind = OBJ_LIST;
+    l->rc = ARENA_RC;
+    l->len = 0;
+    l->cap = n > 0 ? (size_t)n : 4;
+    l->items = arena_alloc(l->cap * sizeof(LumenVal));
+    return box_ptr(l);
+}
 void lumen_list_push(LumenVal lst, LumenVal v) {
     LumenList *l = unbox_ptr(lst);
     if (l->len == l->cap) {
-        l->cap *= 2;
-        l->items = realloc(l->items, l->cap * sizeof(LumenVal));
-        if (!l->items) { fprintf(stderr, "lumen: oom\n"); exit(1); }
+        size_t ncap = l->cap * 2;
+        if (l->rc == ARENA_RC) {
+            LumenVal *ni = arena_alloc(ncap * sizeof(LumenVal));
+            memcpy(ni, l->items, l->len * sizeof(LumenVal));
+            l->items = ni;
+        } else {
+            l->items = realloc(l->items, ncap * sizeof(LumenVal));
+            if (!l->items) { fprintf(stderr, "lumen: oom\n"); exit(1); }
+        }
+        l->cap = ncap;
     }
     l->items[l->len++] = v;
 }
@@ -632,6 +794,22 @@ LumenVal lumen_struct_new(const char *name, int64_t nfields, const char **field_
     for (int64_t i = 0; i < nfields; i++) s->field_vals[i] = lumen_nil();
     return box_ptr(s);
 }
+// Arena variant: struct + field_vals bump-allocated, not GC-tracked. field_names
+// points at the same immortal rodata table the heap ctor uses. Structs never
+// grow, so no arena-aware mutation path is needed.
+LumenVal lumen_struct_new_arena(const char *name, int64_t nfields, const char **field_names) {
+    if (!arena_enabled) return lumen_struct_new(name, nfields, field_names);
+    LumenStruct *s = arena_alloc(sizeof(LumenStruct));
+    arena_track(s);
+    s->kind = OBJ_STRUCT;
+    s->rc = ARENA_RC;
+    s->name = name;
+    s->nfields = (size_t)nfields;
+    s->field_names = field_names;
+    s->field_vals = arena_alloc((nfields ? nfields : 1) * sizeof(LumenVal));
+    for (int64_t i = 0; i < nfields; i++) s->field_vals[i] = lumen_nil();
+    return box_ptr(s);
+}
 static int field_index(LumenStruct *s, const char *fname) {
     for (size_t i = 0; i < s->nfields; i++)
         if (strcmp(s->field_names[i], fname) == 0) return (int)i;
@@ -651,11 +829,12 @@ LumenVal lumen_struct_get(LumenVal sv, const char *fname) {
 }
 
 static double as_num(LumenVal v) {
-    if (lumen_is_double(v)) return lumen_to_double(v);
-    if (lumen_is_int(v))    return (double)lumen_to_int(v);
+    if (v == LUMEN_CANON_NAN) return lumen_to_double(v); // canonical NaN reads as a double
+    if (is_double(v)) return lumen_to_double(v);
+    if (is_int(v))    return (double)lumen_to_int(v);
     lumen_die("arithmetic on non-number");
 }
-static int both_int(LumenVal a, LumenVal b) { return lumen_is_int(a) && lumen_is_int(b); }
+static int both_int(LumenVal a, LumenVal b) { return is_int(a) && is_int(b); }
 
 LumenVal lumen_add(LumenVal a, LumenVal b) {
     if (lumen_is_ptr(a) && lumen_is_ptr(b)) {
@@ -708,7 +887,7 @@ LumenVal lumen_mod(LumenVal a, LumenVal b) {
     return lumen_from_double(as_num(a) - bb * (double)(int64_t)(as_num(a) / bb));
 }
 LumenVal lumen_neg(LumenVal a) {
-    if (lumen_is_int(a)) return lumen_from_int(-lumen_to_int(a));
+    if (is_int(a)) return lumen_from_int(-lumen_to_int(a));
     return lumen_from_double(-as_num(a));
 }
 
@@ -735,9 +914,9 @@ int lumen_truthy(LumenVal v) {
 }
 
 static int vals_eq(LumenVal a, LumenVal b) {
-    if (lumen_is_int(a) && lumen_is_int(b)) return lumen_to_int(a) == lumen_to_int(b);
-    if (lumen_is_double(a) || lumen_is_double(b)) {
-        if ((lumen_is_double(a) || lumen_is_int(a)) && (lumen_is_double(b) || lumen_is_int(b)))
+    if (is_int(a) && is_int(b)) return lumen_to_int(a) == lumen_to_int(b);
+    if (is_double(a) || is_double(b)) {
+        if ((is_double(a) || is_int(a)) && (is_double(b) || is_int(b)))
             return as_num(a) == as_num(b);
     }
     if (lumen_is_bool(a) && lumen_is_bool(b)) return (a & 1) == (b & 1);
@@ -758,7 +937,7 @@ static size_t val_hash(LumenVal v) {
     // Hash canonicalization: an int and a float with the same numeric value must
     // hash (and compare) equal, so a whole-valued double is folded to its int64
     // form before hashing. Only non-integral or out-of-range floats hash by bits.
-    if (lumen_is_int(v) || lumen_is_double(v)) {
+    if (is_int(v) || is_double(v)) {
 
         double d = as_num(v);
         if (isfinite(d) && floor(d) == d && d >= -9.2e18 && d <= 9.2e18) {
@@ -787,6 +966,9 @@ static size_t val_hash(LumenVal v) {
 }
 
 static void fmt_double(double d, char *out, size_t cap) {
+    // match the interpreter's spelling for non-finite values
+    if (d != d) { snprintf(out, cap, "NaN"); return; }
+    if (isinf(d)) { snprintf(out, cap, d < 0 ? "-inf" : "inf"); return; }
 
     if (isfinite(d) && floor(d) == d) {
         snprintf(out, cap, "%.1f", d);
@@ -824,11 +1006,11 @@ static void print_val(LumenVal v, int top);
 static void print_inner(LumenVal v) { print_val(v, 0); }
 
 static void print_val(LumenVal v, int top) {
-    if (lumen_is_double(v)) {
+    if (is_double(v) || v == LUMEN_CANON_NAN) {
         char nb[64];
         fmt_double(lumen_to_double(v), nb, sizeof nb);
         printf("%s", nb);
-    } else if (lumen_is_int(v)) {
+    } else if (is_int(v)) {
         printf("%lld", (long long)lumen_to_int(v));
     } else if (lumen_is_bool(v)) {
         printf(v & 1 ? "true" : "false");
@@ -898,10 +1080,10 @@ static void sb_puts(SBuf *b, const char *s) {
 }
 static void sfmt_val(SBuf *b, LumenVal v, int top) {
     char nb[64];
-    if (lumen_is_double(v)) {
+    if (is_double(v)) {
         fmt_double(lumen_to_double(v), nb, sizeof nb);
         sb_puts(b, nb);
-    } else if (lumen_is_int(v)) {
+    } else if (is_int(v)) {
         snprintf(nb, sizeof nb, "%lld", (long long)lumen_to_int(v));
         sb_puts(b, nb);
     } else if (lumen_is_bool(v)) {
@@ -944,7 +1126,7 @@ static void sfmt_val(SBuf *b, LumenVal v, int top) {
         }
     }
 }
-static LumenVal sfmt_to_str(LumenVal v) {
+static LumenVal sfmt_str(LumenVal v) {
     SBuf b = {0};
     sb_need(&b, 0);
     b.p[0] = 0;
@@ -956,9 +1138,9 @@ static LumenVal sfmt_to_str(LumenVal v) {
 
 LumenVal lumen_to_str(LumenVal v) {
     char buf[512];
-    if (lumen_is_double(v)) {
+    if (is_double(v) || v == LUMEN_CANON_NAN) {
         fmt_double(lumen_to_double(v), buf, sizeof buf);
-    } else if (lumen_is_int(v)) {
+    } else if (is_int(v)) {
         snprintf(buf, sizeof buf, "%lld", (long long)lumen_to_int(v));
     } else if (lumen_is_bool(v)) {
         snprintf(buf, sizeof buf, "%s", (v & 1) ? "true" : "false");
@@ -973,7 +1155,7 @@ LumenVal lumen_to_str(LumenVal v) {
             // list/map/struct/fn: format via the same logic as print_val so
             // str(x) == what print(x) shows. Build into a temp file-less buffer
             // by redirecting through sfmt_val (mirrors print_val exactly).
-            return sfmt_to_str(v);
+            return sfmt_str(v);
         }
     } else {
         buf[0] = 0;
@@ -982,8 +1164,8 @@ LumenVal lumen_to_str(LumenVal v) {
 }
 
 LumenVal lumen_to_int_val(LumenVal v) {
-    if (lumen_is_int(v)) return v;
-    if (lumen_is_double(v)) return lumen_from_int((int64_t)lumen_to_double(v));
+    if (is_int(v)) return v;
+    if (is_double(v)) return lumen_from_int((int64_t)lumen_to_double(v));
     if (lumen_is_ptr(v)) {
         LumenObj *o = unbox_ptr(v);
         if (o->kind == OBJ_STR) return lumen_from_int(strtoll(((LumenStr*)o)->data, NULL, 10));
@@ -991,8 +1173,8 @@ LumenVal lumen_to_int_val(LumenVal v) {
     lumen_die("int() bad arg");
 }
 LumenVal lumen_to_float_val(LumenVal v) {
-    if (lumen_is_double(v)) return v;
-    if (lumen_is_int(v)) return lumen_from_double((double)lumen_to_int(v));
+    if (is_double(v)) return v;
+    if (is_int(v)) return lumen_from_double((double)lumen_to_int(v));
     if (lumen_is_ptr(v)) {
         LumenObj *o = unbox_ptr(v);
         if (o->kind == OBJ_STR) return lumen_from_double(strtod(((LumenStr*)o)->data, NULL));
@@ -1263,7 +1445,7 @@ LumenVal lumen_os_read(LumenVal path) {
     return r;
 }
 
-static LumenVal os_write_mode(LumenVal path, LumenVal text, const char *mode) {
+static LumenVal os_wmode(LumenVal path, LumenVal text, const char *mode) {
     FILE *f = fopen(lumen_cstr(path), mode);
     if (!f) return lumen_false();
     const char *s = lumen_cstr(text);
@@ -1273,9 +1455,9 @@ static LumenVal os_write_mode(LumenVal path, LumenVal text, const char *mode) {
     return lumen_bool(ok);
 }
 
-LumenVal lumen_os_write(LumenVal path, LumenVal text) { return os_write_mode(path, text, "wb"); }
+LumenVal lumen_os_write(LumenVal path, LumenVal text) { return os_wmode(path, text, "wb"); }
 
-LumenVal lumen_os_append(LumenVal path, LumenVal text) { return os_write_mode(path, text, "ab"); }
+LumenVal lumen_os_append(LumenVal path, LumenVal text) { return os_wmode(path, text, "ab"); }
 
 LumenVal lumen_os_exists(LumenVal path) {
     struct stat st;
@@ -1310,7 +1492,7 @@ LumenVal lumen_os_mkdir(LumenVal path) {
 #endif
 }
 
-static int os_cmp_str(const void *a, const void *b) {
+static int os_cmpstr(const void *a, const void *b) {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
@@ -1328,7 +1510,7 @@ LumenVal lumen_os_listdir(LumenVal path) {
         n++;
     }
     closedir(d);
-    qsort(names, n, sizeof(char *), os_cmp_str);
+    qsort(names, n, sizeof(char *), os_cmpstr);
     LumenVal list = lumen_list_new((int64_t)n);
     for (size_t i = 0; i < n; i++) { lumen_list_push(list, lumen_str_new(names[i])); xfree(names[i]); }
     free(names);
@@ -1418,7 +1600,7 @@ LumenVal lumen_os_exec(LumenVal cmd) {
 }
 
 LumenVal lumen_os_exit(LumenVal code) {
-    int c = lumen_is_int(code) ? (int)lumen_to_int(code) : 0;
+    int c = is_int(code) ? (int)lumen_to_int(code) : 0;
     exit(c);
 }
 
@@ -1480,7 +1662,7 @@ static int net_addr(const char *host, int port, struct sockaddr_in *sa) {
     return 1;
 }
 
-static LumenVal net_ip_string(struct in_addr a) {
+static LumenVal net_ipstr(struct in_addr a) {
     unsigned char *o = (unsigned char *)&a.s_addr;
     char buf[32];
     snprintf(buf, sizeof buf, "%u.%u.%u.%u", o[0], o[1], o[2], o[3]);
@@ -1575,7 +1757,7 @@ LumenVal lumen_net_recvfrom(LumenVal sock, LumenVal max) {
     buf[n] = '\0';
     LumenVal mp = lumen_map_new();
     lumen_map_set(mp, lumen_str_new("data"), lumen_str_new(buf));
-    lumen_map_set(mp, lumen_str_new("host"), net_ip_string(from.sin_addr));
+    lumen_map_set(mp, lumen_str_new("host"), net_ipstr(from.sin_addr));
     lumen_map_set(mp, lumen_str_new("port"), lumen_from_int((int64_t)ntohs(from.sin_port)));
     xfree(buf);
     return mp;
@@ -1639,7 +1821,7 @@ LumenVal lumen_net_resolve(LumenVal host) {
     net_start();
     struct sockaddr_in sa;
     if (!net_addr(lumen_cstr(host), 0, &sa) || sa.sin_addr.s_addr == 0) return lumen_nil();
-    return net_ip_string(sa.sin_addr);
+    return net_ipstr(sa.sin_addr);
 }
 
 LumenVal lumen_net_local_port(LumenVal sock) {
@@ -1685,13 +1867,13 @@ static uint64_t lumen_splitmix64(void) {
 }
 
 LumenVal lumen_rand_seed(LumenVal n) {
-    lumen_rng_state = (uint64_t)(lumen_is_int(n) ? lumen_to_int(n) : 0);
+    lumen_rng_state = (uint64_t)(is_int(n) ? lumen_to_int(n) : 0);
     return lumen_nil();
 }
 
 LumenVal lumen_rand_int(LumenVal lov, LumenVal hiv) {
-    int64_t lo = lumen_is_int(lov) ? lumen_to_int(lov) : 0;
-    int64_t hi = lumen_is_int(hiv) ? lumen_to_int(hiv) : 0;
+    int64_t lo = is_int(lov) ? lumen_to_int(lov) : 0;
+    int64_t hi = is_int(hiv) ? lumen_to_int(hiv) : 0;
     if (hi < lo) return lumen_from_int(lo);
     uint64_t span = (uint64_t)(hi - lo) + 1ull;
     uint64_t r = lumen_splitmix64() % span;
@@ -1757,7 +1939,7 @@ static void jb_puts(JBuf *b, const char *s) {
     memcpy(b->p + b->len, s, n); b->len += n; b->p[b->len] = 0;
 }
 
-static void jb_put_json_str(JBuf *b, const char *s) {
+static void jb_putstr(JBuf *b, const char *s) {
     jb_putc(b, '"');
     for (; *s; s++) {
         unsigned char c = (unsigned char)*s;
@@ -1776,10 +1958,10 @@ static void jb_put_json_str(JBuf *b, const char *s) {
 
 static void json_write(JBuf *b, LumenVal v) {
     char num[512];
-    if (lumen_is_int(v)) {
+    if (is_int(v)) {
         snprintf(num, sizeof num, "%lld", (long long)lumen_to_int(v));
         jb_puts(b, num);
-    } else if (lumen_is_double(v)) {
+    } else if (is_double(v)) {
         fmt_double(lumen_to_double(v), num, sizeof num);
         jb_puts(b, num);
     } else if (lumen_is_bool(v)) {
@@ -1789,7 +1971,7 @@ static void json_write(JBuf *b, LumenVal v) {
     } else if (lumen_is_ptr(v)) {
         LumenObj *o = unbox_ptr(v);
         if (o->kind == OBJ_STR) {
-            jb_put_json_str(b, ((LumenStr *)o)->data);
+            jb_putstr(b, ((LumenStr *)o)->data);
         } else if (o->kind == OBJ_LIST) {
             LumenList *l = (LumenList *)o;
             jb_putc(b, '[');
@@ -1802,7 +1984,7 @@ static void json_write(JBuf *b, LumenVal v) {
                 if (i) jb_putc(b, ',');
 
                 LumenVal ks = lumen_to_str(m->keys[i]);
-                jb_put_json_str(b, ((LumenStr *)unbox_ptr(ks))->data);
+                jb_putstr(b, ((LumenStr *)unbox_ptr(ks))->data);
                 jb_putc(b, ':');
                 json_write(b, m->vals[i]);
             }
@@ -1824,7 +2006,7 @@ LumenVal lumen_json_stringify(LumenVal v) {
 }
 
 typedef struct { const char *s; int ok; } JP;
-static void jp_skip_ws(JP *p) {
+static void jp_ws(JP *p) {
     while (*p->s == ' ' || *p->s == '\t' || *p->s == '\n' || *p->s == (char)13) p->s++;
 }
 static LumenVal jp_value(JP *p);
@@ -1898,14 +2080,14 @@ static LumenVal jp_number(JP *p) {
 static LumenVal jp_array(JP *p) {
     p->s++;
     LumenVal list = lumen_list_new(4);
-    jp_skip_ws(p);
+    jp_ws(p);
     if (*p->s == ']') { p->s++; return list; }
     for (;;) {
         LumenVal el = jp_value(p);
         if (!p->ok) return lumen_nil();
         lumen_list_push(list, el);
-        jp_skip_ws(p);
-        if (*p->s == ',') { p->s++; jp_skip_ws(p); continue; }
+        jp_ws(p);
+        if (*p->s == ',') { p->s++; jp_ws(p); continue; }
         if (*p->s == ']') { p->s++; break; }
         p->ok = 0; return lumen_nil();
     }
@@ -1915,20 +2097,20 @@ static LumenVal jp_array(JP *p) {
 static LumenVal jp_object(JP *p) {
     p->s++;
     LumenVal map = lumen_map_new();
-    jp_skip_ws(p);
+    jp_ws(p);
     if (*p->s == '}') { p->s++; return map; }
     for (;;) {
-        jp_skip_ws(p);
+        jp_ws(p);
         if (*p->s != '"') { p->ok = 0; return lumen_nil(); }
         LumenVal key = jp_string(p);
         if (!p->ok) return lumen_nil();
-        jp_skip_ws(p);
+        jp_ws(p);
         if (*p->s != ':') { p->ok = 0; return lumen_nil(); }
         p->s++;
         LumenVal val = jp_value(p);
         if (!p->ok) return lumen_nil();
         lumen_map_set(map, key, val);
-        jp_skip_ws(p);
+        jp_ws(p);
         if (*p->s == ',') { p->s++; continue; }
         if (*p->s == '}') { p->s++; break; }
         p->ok = 0; return lumen_nil();
@@ -1937,7 +2119,7 @@ static LumenVal jp_object(JP *p) {
 }
 
 static LumenVal jp_value(JP *p) {
-    jp_skip_ws(p);
+    jp_ws(p);
     char c = *p->s;
     if (c == '"') return jp_string(p);
     if (c == '{') return jp_object(p);
@@ -1954,16 +2136,16 @@ LumenVal lumen_json_parse(LumenVal sv) {
     JP p = { lumen_cstr(sv), 1 };
     LumenVal v = jp_value(&p);
     if (!p.ok) return lumen_nil();
-    jp_skip_ws(&p);
+    jp_ws(&p);
     if (*p.s != 0) return lumen_nil();
     return v;
 }
 
 int64_t lumen_ffi_argint(LumenVal v) {
-    if (lumen_is_int(v)) return lumen_to_int(v);
+    if (is_int(v)) return lumen_to_int(v);
     if (lumen_is_bool(v)) return (v & 1);
     if (lumen_is_nil(v)) return 0;
-    if (lumen_is_double(v)) return (int64_t)lumen_to_double(v);
+    if (is_double(v)) return (int64_t)lumen_to_double(v);
     if (lumen_is_ptr(v)) {
         LumenObj *o = unbox_ptr(v);
 
@@ -1977,8 +2159,8 @@ int64_t lumen_ffi_argdouble(LumenVal v) {
     // FFI float arg: coerce any numeric Lumen value to a double, then return its
     // raw bits so the caller/asm can place it in an xmm register unchanged.
     double d;
-    if (lumen_is_double(v)) d = lumen_to_double(v);
-    else if (lumen_is_int(v)) d = (double)lumen_to_int(v);
+    if (is_double(v)) d = lumen_to_double(v);
+    else if (is_int(v)) d = (double)lumen_to_int(v);
     else if (lumen_is_bool(v)) d = (double)(v & 1);
     else d = 0.0;
     int64_t bits;
@@ -2108,7 +2290,7 @@ LumenVal lumen_list_contains(LumenVal lst, LumenVal v);
 LumenVal lumen_sum(LumenVal lst) {
     LumenList *l = unbox_ptr(lst);
     int all_int = 1;
-    for (size_t i = 0; i < l->len; i++) if (!lumen_is_int(l->items[i])) { all_int = 0; break; }
+    for (size_t i = 0; i < l->len; i++) if (!is_int(l->items[i])) { all_int = 0; break; }
     if (all_int) {
         int64_t s = 0;
         for (size_t i = 0; i < l->len; i++) s += lumen_to_int(l->items[i]);
@@ -2135,12 +2317,12 @@ LumenVal lumen_max(LumenVal lst) {
     return best;
 }
 LumenVal lumen_abs(LumenVal v) {
-    if (lumen_is_int(v)) { int64_t n = lumen_to_int(v); return lumen_from_int(n < 0 ? -n : n); }
+    if (is_int(v)) { int64_t n = lumen_to_int(v); return lumen_from_int(n < 0 ? -n : n); }
     return lumen_from_double(fabs(as_num(v)));
 }
 
 LumenVal lumen_round(LumenVal v) {
-    if (lumen_is_int(v)) return v;
+    if (is_int(v)) return v;
     return lumen_from_int((int64_t)round(as_num(v)));
 }
 
@@ -2150,8 +2332,8 @@ void lumen_assert(LumenVal cond) {
 
 LumenVal lumen_type(LumenVal v) {
     const char *t;
-    if (lumen_is_double(v)) t = "f64";
-    else if (lumen_is_int(v)) t = "i64";
+    if (is_double(v)) t = "f64";
+    else if (is_int(v)) t = "i64";
     else if (lumen_is_bool(v)) t = "bool";
     else if (lumen_is_nil(v)) t = "nil";
     else if (lumen_is_ptr(v)) {
@@ -2180,14 +2362,14 @@ LumenVal lumen_str_lower(LumenVal v) {
     return r;
 }
 
-static int lumen_is_ws_ch(char c) {
+static int is_wsch(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 LumenVal lumen_str_trim(LumenVal v) {
     LumenStr *s = as_str(v);
     size_t a = 0, b = s->len;
-    while (a < b && lumen_is_ws_ch(s->data[a])) a++;
-    while (b > a && lumen_is_ws_ch(s->data[b-1])) b--;
+    while (a < b && is_wsch(s->data[a])) a++;
+    while (b > a && is_wsch(s->data[b-1])) b--;
     char *buf = xalloc(b - a + 1);
     memcpy(buf, s->data + a, b - a);
     buf[b - a] = '\0';
@@ -2245,7 +2427,7 @@ LumenVal lumen_str_find(LumenVal v, LumenVal subv) {
 LumenVal lumen_str_lstrip(LumenVal v) {
     LumenStr *s = as_str(v);
     size_t a = 0, b = s->len;
-    while (a < b && lumen_is_ws_ch(s->data[a])) a++;
+    while (a < b && is_wsch(s->data[a])) a++;
     char *buf = xalloc(b - a + 1);
     memcpy(buf, s->data + a, b - a);
     buf[b - a] = '\0';
@@ -2257,7 +2439,7 @@ LumenVal lumen_str_lstrip(LumenVal v) {
 LumenVal lumen_str_rstrip(LumenVal v) {
     LumenStr *s = as_str(v);
     size_t a = 0, b = s->len;
-    while (b > a && lumen_is_ws_ch(s->data[b-1])) b--;
+    while (b > a && is_wsch(s->data[b-1])) b--;
     char *buf = xalloc(b - a + 1);
     memcpy(buf, s->data + a, b - a);
     buf[b - a] = '\0';
@@ -2317,7 +2499,7 @@ LumenVal lumen_str_title(LumenVal v) {
     int at_word_start = 1;
     for (size_t i = 0; i < rs->len; i++) {
         unsigned char b = (unsigned char)rs->data[i];
-        int is_ws = lumen_is_ws_ch((char)b);
+        int is_ws = is_wsch((char)b);
         if (at_word_start) {
             if (b >= 'a' && b <= 'z') rs->data[i] = (char)(b - 32);
         } else {
@@ -2366,15 +2548,15 @@ LumenVal lumen_list_count(LumenVal lst, LumenVal v) {
     return lumen_from_int(n);
 }
 
-static int obj_kind_of(LumenVal v) {
+static int obj_kind(LumenVal v) {
     if (lumen_is_ptr(v)) return ((LumenObj *)unbox_ptr(v))->kind;
     return -1;
 }
 
 LumenVal lumen_map_has(LumenVal mv, LumenVal key);
 LumenVal lumen_contains(LumenVal recv, LumenVal needle) {
-    if (obj_kind_of(recv) == OBJ_LIST) return lumen_list_contains(recv, needle);
-    if (obj_kind_of(recv) == OBJ_MAP) return lumen_map_has(recv, needle);
+    if (obj_kind(recv) == OBJ_LIST) return lumen_list_contains(recv, needle);
+    if (obj_kind(recv) == OBJ_MAP) return lumen_map_has(recv, needle);
     return lumen_str_contains(recv, needle);
 }
 
@@ -2386,9 +2568,9 @@ LumenVal lumen_not_in(LumenVal x, LumenVal container) {
 }
 
 LumenVal lumen_join(LumenVal recv, LumenVal arg) {
-    if (obj_kind_of(recv) == OBJ_STR && obj_kind_of(arg) == OBJ_LIST)
+    if (obj_kind(recv) == OBJ_STR && obj_kind(arg) == OBJ_LIST)
         return lumen_str_join(recv, arg);
-    if (obj_kind_of(recv) == OBJ_LIST && obj_kind_of(arg) == OBJ_STR)
+    if (obj_kind(recv) == OBJ_LIST && obj_kind(arg) == OBJ_STR)
         return lumen_str_join(arg, recv);
     lumen_die("join expects a string and a list");
 }
@@ -2406,24 +2588,45 @@ LumenVal lumen_map_new(void) {
     m->idx = xalloc(m->idx_cap * sizeof(size_t));
     return box_ptr(m);
 }
+// Arena variant: all buffers bump-allocated, not GC-tracked, freed by frame reset.
+LumenVal lumen_map_new_arena(void) {
+    if (!arena_enabled) return lumen_map_new();
+    LumenMap *m = arena_alloc(sizeof(LumenMap));
+    arena_track(m);
+    m->kind = OBJ_MAP;
+    m->rc = ARENA_RC;
+    m->len = 0;
+    m->cap = 4;
+    m->keys = arena_alloc(m->cap * sizeof(LumenVal));
+    m->vals = arena_alloc(m->cap * sizeof(LumenVal));
+    m->idx_cap = 8;
+    m->idx = arena_alloc(m->idx_cap * sizeof(size_t));
+    return box_ptr(m);
+}
 
 static LumenMap *as_map(LumenVal v) {
-    if (obj_kind_of(v) == OBJ_MAP) return (LumenMap *)unbox_ptr(v);
+    if (obj_kind(v) == OBJ_MAP) return (LumenMap *)unbox_ptr(v);
     lumen_die("expected a map");
 }
 
-static void map_idx_put(LumenMap *m, size_t slot) {
+static void idx_put(LumenMap *m, size_t slot) {
     size_t mask = m->idx_cap - 1;
     size_t i = val_hash(m->keys[slot]) & mask;
     while (m->idx[i]) i = (i + 1) & mask;
     m->idx[i] = slot + 1;
 }
 
-static void map_idx_rebuild(LumenMap *m, size_t want) {
+static void idx_rebuild(LumenMap *m, size_t want) {
+    size_t old = m->idx_cap;
     while (m->idx_cap < want * 2) m->idx_cap *= 2;
-    m->idx = realloc(m->idx, m->idx_cap * sizeof(size_t));
+    if (m->rc == ARENA_RC) {
+        m->idx = arena_alloc(m->idx_cap * sizeof(size_t)); // old block wasted, fine
+    } else {
+        m->idx = realloc(m->idx, m->idx_cap * sizeof(size_t));
+    }
+    (void)old;
     memset(m->idx, 0, m->idx_cap * sizeof(size_t));
-    for (size_t s = 0; s < m->len; s++) map_idx_put(m, s);
+    for (size_t s = 0; s < m->len; s++) idx_put(m, s);
 }
 
 static ptrdiff_t map_find(LumenMap *m, LumenVal key) {
@@ -2443,9 +2646,18 @@ void lumen_map_set(LumenVal mv, LumenVal key, LumenVal val) {
     ptrdiff_t found = map_find(m, key);
     if (found >= 0) { m->vals[found] = val; return; }
     if (m->len == m->cap) {
-        m->cap *= 2;
-        m->keys = realloc(m->keys, m->cap * sizeof(LumenVal));
-        m->vals = realloc(m->vals, m->cap * sizeof(LumenVal));
+        size_t ncap = m->cap * 2;
+        if (m->rc == ARENA_RC) {
+            LumenVal *nk = arena_alloc(ncap * sizeof(LumenVal));
+            LumenVal *nv = arena_alloc(ncap * sizeof(LumenVal));
+            memcpy(nk, m->keys, m->len * sizeof(LumenVal));
+            memcpy(nv, m->vals, m->len * sizeof(LumenVal));
+            m->keys = nk; m->vals = nv;
+        } else {
+            m->keys = realloc(m->keys, ncap * sizeof(LumenVal));
+            m->vals = realloc(m->vals, ncap * sizeof(LumenVal));
+        }
+        m->cap = ncap;
     }
     size_t slot = m->len;
     m->keys[slot] = key;
@@ -2453,9 +2665,9 @@ void lumen_map_set(LumenVal mv, LumenVal key, LumenVal val) {
     m->len++;
 
     if ((m->len) * 10 >= m->idx_cap * 7) {
-        map_idx_rebuild(m, m->len);
+        idx_rebuild(m, m->len);
     } else {
-        map_idx_put(m, slot);
+        idx_put(m, slot);
     }
 }
 
@@ -2502,12 +2714,12 @@ LumenVal lumen_map_remove(LumenVal mv, LumenVal key) {
     }
     m->len--;
 
-    map_idx_rebuild(m, m->len);
+    idx_rebuild(m, m->len);
     return v;
 }
 
 LumenVal lumen_index_get(LumenVal obj, LumenVal key) {
-    int k = obj_kind_of(obj);
+    int k = obj_kind(obj);
     if (k == OBJ_MAP) return lumen_map_get(obj, key);
     if (k == OBJ_LIST) return lumen_list_get(obj, lumen_to_int(key));
     if (k == OBJ_STR) {
@@ -2520,15 +2732,15 @@ LumenVal lumen_index_get(LumenVal obj, LumenVal key) {
     lumen_die("cannot index this value");
 }
 void lumen_index_set(LumenVal obj, LumenVal key, LumenVal val) {
-    int k = obj_kind_of(obj);
+    int k = obj_kind(obj);
     if (k == OBJ_MAP) { lumen_map_set(obj, key, val); return; }
     if (k == OBJ_LIST) { lumen_list_set(obj, lumen_to_int(key), val); return; }
     lumen_die("cannot index-assign this value");
 }
 
 LumenVal lumen_iter_prep(LumenVal obj) {
-    if (obj_kind_of(obj) == OBJ_MAP) return lumen_map_keys(obj);
-    if (obj_kind_of(obj) == OBJ_STR) {
+    if (obj_kind(obj) == OBJ_MAP) return lumen_map_keys(obj);
+    if (obj_kind(obj) == OBJ_STR) {
         LumenStr *s = (LumenStr *)unbox_ptr(obj);
         LumenVal out = lumen_list_new((int64_t)s->len);
         char buf[2];
@@ -2539,7 +2751,7 @@ LumenVal lumen_iter_prep(LumenVal obj) {
         }
         return out;
     }
-    if (obj_kind_of(obj) == OBJ_LIST) {
+    if (obj_kind(obj) == OBJ_LIST) {
 
         LumenList *l = (LumenList *)unbox_ptr(obj);
         LumenVal out = lumen_list_new((int64_t)l->len);
@@ -2562,7 +2774,7 @@ static void slice_bounds(int64_t lo, int64_t hi, int64_t len, int64_t *pa, int64
 }
 
 LumenVal lumen_slice(LumenVal obj, LumenVal lov, LumenVal hiv) {
-    int kind = obj_kind_of(obj);
+    int kind = obj_kind(obj);
     int64_t len = 0;
     if (kind == OBJ_LIST) len = (int64_t)((LumenList *)unbox_ptr(obj))->len;
     else if (kind == OBJ_STR) len = (int64_t)((LumenStr *)unbox_ptr(obj))->len;
@@ -2650,7 +2862,7 @@ typedef LumenVal (*Fn7)(LumenVal, LumenVal, LumenVal, LumenVal, LumenVal, LumenV
 typedef LumenVal (*Fn8)(LumenVal, LumenVal, LumenVal, LumenVal, LumenVal, LumenVal, LumenVal, LumenVal);
 
 static LumenFunc *as_func(LumenVal f) {
-    if (obj_kind_of(f) != OBJ_FUNC) { lumen_die("call of non-function value"); }
+    if (obj_kind(f) != OBJ_FUNC) { lumen_die("call of non-function value"); }
     return (LumenFunc *)unbox_ptr(f);
 }
 
@@ -2693,7 +2905,7 @@ LumenVal lumen_call4(LumenVal f, LumenVal a, LumenVal b, LumenVal c, LumenVal d)
 static LumenVal lumen_cb_fns[LUMEN_CB_POOL];
 static int      lumen_cb_used[LUMEN_CB_POOL];
 
-static int64_t lumen_cb_dispatch(int idx, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {
+static int64_t cb_dispatch(int idx, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {
     if (idx < 0 || idx >= LUMEN_CB_POOL || !lumen_cb_used[idx]) return 0;
     LumenVal f = lumen_cb_fns[idx];
     LumenFunc *fn = as_func(f);
@@ -2713,7 +2925,7 @@ static int64_t lumen_cb_dispatch(int idx, int64_t a0, int64_t a1, int64_t a2, in
 
 #define LUMEN_CB_THUNK(N) \
     static int64_t lumen_cb_thunk_##N(int64_t a0, int64_t a1, int64_t a2, int64_t a3) { \
-        return lumen_cb_dispatch(N, a0, a1, a2, a3); \
+        return cb_dispatch(N, a0, a1, a2, a3); \
     }
 LUMEN_CB_THUNK(0)  LUMEN_CB_THUNK(1)  LUMEN_CB_THUNK(2)  LUMEN_CB_THUNK(3)
 LUMEN_CB_THUNK(4)  LUMEN_CB_THUNK(5)  LUMEN_CB_THUNK(6)  LUMEN_CB_THUNK(7)
@@ -2728,7 +2940,7 @@ static void *const lumen_cb_thunks[LUMEN_CB_POOL] = {
 };
 
 LumenVal lumen_cb_register(LumenVal fn) {
-    if (obj_kind_of(fn) != OBJ_FUNC) lumen_die("callback: argument must be a function");
+    if (obj_kind(fn) != OBJ_FUNC) lumen_die("callback: argument must be a function");
     for (int i = 0; i < LUMEN_CB_POOL; i++) {
         if (!lumen_cb_used[i]) {
             lumen_cb_used[i] = 1;
@@ -2765,7 +2977,7 @@ LumenVal lumen_is_space(LumenVal v) {
 }
 
 LumenVal lumen_input(LumenVal prompt) {
-    if (lumen_is_ptr(prompt) && obj_kind_of(prompt) == OBJ_STR) {
+    if (lumen_is_ptr(prompt) && obj_kind(prompt) == OBJ_STR) {
         fputs(((LumenStr *)unbox_ptr(prompt))->data, stdout);
         fflush(stdout);
     }

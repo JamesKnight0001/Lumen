@@ -1,4 +1,3 @@
-
 //! Recursive-descent parser with a Pratt (precedence-climbing) expression core.
 //! Statements use the layout tokens from the lexer: a `:` header followed by an
 //! indented block, or a single inline statement. It also sprinkles SrcLine
@@ -111,7 +110,7 @@ impl Parser {
     // A statement must end at a line boundary: Newline (also produced by `;`),
     // Dedent, or Eof. Anything else means trailing junk on the line (e.g.
     // `return x  999`), which we reject instead of silently starting a new stmt.
-    fn expect_stmt_end(&mut self) -> PResult<()> {
+    fn end_stmt(&mut self) -> PResult<()> {
         if matches!(self.peek(), Tok::Newline | Tok::Dedent | Tok::Eof) {
             Ok(())
         } else {
@@ -582,7 +581,7 @@ impl Parser {
             }
         };
         // Leaf statement must end the line; trailing tokens are an error.
-        self.expect_stmt_end()?;
+        self.end_stmt()?;
         Ok(stmt)
     }
 
@@ -752,8 +751,8 @@ impl Parser {
                 Tok::LParen => {
 
                     self.advance();
-                    if self.is_named_args() {
-                        let args = self.parse_named_args()?;
+                    if self.is_nargs() {
+                        let args = self.parse_nargs()?;
                         e = Expr::NamedCall {
                             callee: Box::new(e),
                             args,
@@ -849,13 +848,13 @@ impl Parser {
 
     // Distinguish `f(x: 1)` (named/struct-literal args) from a positional call by
     // peeking for `Ident :` right after the open paren.
-    fn is_named_args(&self) -> bool {
+    fn is_nargs(&self) -> bool {
 
         matches!(&self.toks[self.pos].tok, Tok::Ident(_))
             && matches!(&self.toks[self.pos + 1].tok, Tok::Colon)
     }
 
-    fn parse_named_args(&mut self) -> PResult<Vec<(String, Expr)>> {
+    fn parse_nargs(&mut self) -> PResult<Vec<(String, Expr)>> {
         let mut args = Vec::new();
         if !self.check(&Tok::RParen) {
             loop {
@@ -1036,7 +1035,7 @@ fn parse_fstring(s: &str) -> Vec<FStrPart> {
 
             match crate::lexer::Lexer::new(&expr_src)
                 .tokenize()
-                .and_then(|t| Parser::new(t).parse_expr_top())
+                .and_then(|t| Parser::new(t).parse_top())
             {
                 Ok(e) => parts.push(FStrPart::Expr(e)),
                 Err(_) => parts.push(FStrPart::Lit(format!("{{{}}}", expr_src))),
@@ -1057,7 +1056,7 @@ fn parse_fstring(s: &str) -> Vec<FStrPart> {
 
 impl Parser {
 
-    fn parse_expr_top(&mut self) -> PResult<Expr> {
+    fn parse_top(&mut self) -> PResult<Expr> {
         self.skip_newlines();
         self.parse_expr()
     }
@@ -1066,16 +1065,16 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use crate::ast::DeclKind;
-    use crate::parse_program_spanned;
+    use crate::parse_spanned;
 
     // Every decl span must slice back to exactly its own name in the source.
     #[test]
-    fn spans_map_to_names() {
+    fn spans_named() {
         let src = "from math import sqrt, pi\n\
                    struct Point:\n    x: int\n    y: int\n\
                    impl Point:\n    fn dist(self, other):\n        return sqrt(other)\n\
                    fn main(a, b):\n    print(a)\n";
-        let (_, decls) = parse_program_spanned(src).expect("parse");
+        let (_, decls) = parse_spanned(src).expect("parse");
         let lines: Vec<&str> = src.split('\n').collect();
         for d in &decls {
             let l = lines[d.line - 1];
@@ -1098,7 +1097,7 @@ mod tests {
 
     // The normal (spanless) parse path must yield no decls.
     #[test]
-    fn spanless_path_collects_nothing() {
+    fn spanless_empty() {
         let toks = crate::lexer::Lexer::new("fn f():\n    return 1\n")
             .tokenize()
             .unwrap();
@@ -1111,7 +1110,7 @@ mod tests {
     // silently parsed as a second statement. Regression for `return x 999`,
     // `let x = 1 2`, bare-literal-then-more, `f() garbage`, etc.
     #[test]
-    fn rejects_trailing_junk_after_statement() {
+    fn reject_junk() {
         let bad = [
             "fn f():\n    return 1 999\n",
             "fn f():\n    let x = 1 2 3\n    return x\n",
@@ -1130,7 +1129,7 @@ mod tests {
     // `;` is a statement separator (lexes to Newline), so these stay valid.
     // Compound statements remain self-terminating. Guards against over-rejection.
     #[test]
-    fn accepts_valid_statement_ends() {
+    fn stmt_ends() {
         let good = [
             "fn main():\n    print(1); print(2)\n",
             "fn main():\n    print(1);\n",

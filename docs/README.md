@@ -1,12 +1,11 @@
 # Lumen documentation
 
-Two ways in, depending on what you're after:
+Two ways in:
 
 ### [`lumen/`](lumen/): how the language *works*
-The mental model. What Lumen is, how a program runs (and why there are two ways
-to run it that must agree to the byte), how memory works, where the speed comes
-from, how it talks to the outside world, and what it can't do yet. Read this
-first if you've never seen Lumen.
+The mental model: what Lumen is, how a program runs (and why two ways to run it
+must agree to the byte), how memory works, where the speed comes from, how it
+talks to the outside world, and what it can't do yet. Start here.
 
 - [What Lumen is](lumen/overview.md)
 - [Running and building a program](lumen/running.md)
@@ -17,8 +16,8 @@ first if you've never seen Lumen.
 - [What it can't do yet](lumen/limitations.md)
 
 ### [`syntax/`](syntax/): how the *syntax* works
-The reference. One page per feature, each with copy-pasteable examples. Reach for
-this when you know what you want and just need to remember how to spell it.
+The reference: one page per feature with copy-pasteable examples. Reach for this
+when you know what you want and just need the spelling.
 
 - [The basics: layout, comments, `main`](syntax/basics.md)
 - [Values and types](syntax/values.md)
@@ -35,7 +34,6 @@ this when you know what you want and just need to remember how to spell it.
 
 ---
 
-Every example in these docs runs identically under `lumen run` (the interpreter)
-and `lumen build` (a native `.exe`). That's the project's core promise, and the
-test suite enforces it. If something here disagrees with the compiler, the docs
-are wrong; please flag it.
+Every example here runs identically under `lumen run` (interpreter) and
+`lumen build` (native `.exe`). That's the core promise, enforced by the test
+suite. If something here disagrees with the compiler, the docs are wrong; flag it.

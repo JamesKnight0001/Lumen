@@ -5,14 +5,14 @@ fn add(a, b):
     return a + b
 ```
 
-Define with `fn`, take some parameters, `return` a value. Or don't: a function
-that falls off the end just returns `nil`. You can call a function from anywhere
-in the file, because **declaration order doesn't matter**, so mutually recursive
-functions are no trouble at all.
+Define with `fn`, take parameters, `return` a value. Or don't: a function that
+falls off the end returns `nil`. Call a function from anywhere in the file,
+because **declaration order doesn't matter**, so mutually recursive functions
+just work.
 
 ## Expression-bodied form
 
-When the whole body is a single expression, you can skip the block entirely:
+When the body is a single expression, skip the block entirely:
 
 ```lumen
 fn square(n) = n * n
@@ -26,12 +26,12 @@ fn sum6(a, b, c, d, e, f):
     return a + b + c + d + e + f
 ```
 
-There's no special limit to keep in mind. Pass as many as you like.
+There's no limit. Pass as many as you like.
 
 ## Default arguments
 
-A parameter can carry a default with `= value`. When a caller omits that
-trailing argument, the default fills in. Defaults can be any expression:
+A parameter can carry a default with `= value`. Omit that trailing argument and
+the default fills in. Defaults can be any expression:
 
 ```lumen
 fn power(base, exp=2):
@@ -45,17 +45,15 @@ fn main():
     print(power(2, 10))  # 1024
 ```
 
-The rule is the familiar one: once a parameter has a default, every parameter
-after it must too (otherwise an omitted argument couldn't be filled). Defaults
-are expanded at the call site, so the interpreter and the compiled binary behave
-identically.
+The usual rule: once a parameter has a default, every parameter after it must
+too. Defaults expand at the call site, so the interpreter and compiled binary
+behave identically.
 
 ## Functions are values
 
-A bare function name (no parentheses) *is* a value. You can pass functions to
-other functions, stash them in lists and maps, return them, and call them
-indirectly. This is the foundation everything else builds on: `map`/`filter`,
-dispatch tables, the lot.
+A bare function name (no parentheses) *is* a value. Pass functions to other
+functions, stash them in lists and maps, return them, call them indirectly. This
+is the foundation for everything else: `map`/`filter`, dispatch tables, the lot.
 
 ```lumen
 fn add(a, b): return a + b
@@ -76,13 +74,12 @@ fn main():
 ## Anonymous functions and closures
 
 Write a function inline with `fn(params): expr` (a single expression) or with an
-indented block body. The interesting part is that anonymous functions **capture**
-the variables around them:
+indented block body. Anonymous functions **capture** the variables around them:
 
 - **by value** if the captured variable is never reassigned, or
 - **by reference** (shared, mutable) if it is,
 
-which means stateful closures behave the way you'd hope they would:
+so stateful closures behave the way you'd hope:
 
 ```lumen
 fn make_counter():
@@ -99,8 +96,8 @@ fn main():
     print(d())     # 1   (each counter keeps its own independent count)
 ```
 
-Pair closures with [`list.map` and `list.filter`](lists.md) for compact
-transformations  the `fn(...)` literal can go straight into the method call:
+Pair closures with [`list.map` and `list.filter`](lists.md): the `fn(...)`
+literal goes straight into the method call:
 
 ```lumen
 let evens = [1, 2, 3, 4, 5, 6].filter(fn(v): v % 2 == 0)   # [2, 4, 6]
@@ -110,5 +107,5 @@ let squares = [1, 2, 3, 4].map(fn(v): v * v)               # [1, 4, 9, 16]
 ## A small FFI footnote
 
 Handing a Lumen function to the operating system as a *callback* (a `WndProc`,
-say) requires a compiled program. See [FFI](../lumen/ffi.md) for the details.
-Ordinary Lumen-to-Lumen calls have no such restriction.
+say) requires a compiled program. See [FFI](../lumen/ffi.md). Ordinary
+Lumen-to-Lumen calls have no such restriction.

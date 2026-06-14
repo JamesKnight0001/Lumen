@@ -1,4 +1,3 @@
-
 //! Built-in standard-library modules (math, os, rand, time, json, cffi, ...).
 //! The MODULE_FUNCS table near the bottom is the single source of truth: every
 //! entry binds a module.name to its arity, the runtime C symbol, and an `eval`
@@ -106,7 +105,7 @@ fn cget_bytes(args: &[Value], width: usize, who: &str) -> Result<(Vec<u8>, ()), 
 }
 
 #[cfg(windows)]
-fn com_vcall_impl(obj: i64, slot: i64, args: &[u8], ret_kind: i64) -> Result<Value, String> {
+fn com_vcall(obj: i64, slot: i64, args: &[u8], ret_kind: i64) -> Result<Value, String> {
     if obj == 0 {
         return Err("vcall: null object".into());
     }
@@ -145,20 +144,20 @@ fn com_vcall_impl(obj: i64, slot: i64, args: &[u8], ret_kind: i64) -> Result<Val
 }
 
 #[cfg(not(windows))]
-fn com_vcall_impl(_obj: i64, _slot: i64, _args: &[u8], _ret_kind: i64) -> Result<Value, String> {
+fn com_vcall(_obj: i64, _slot: i64, _args: &[u8], _rkind: i64) -> Result<Value, String> {
     Err("vcall: COM/vtable calls are only supported on Windows".into())
 }
 
 // Format a Unix epoch as UTC "YYYY-MM-DD HH:MM:SS" using Howard Hinnant's
 // days-from-civil algorithm (the 719468 / 146097 era math), so we avoid pulling
 // in a date library. div_euclid/rem_euclid keep it correct for negative epochs.
-fn fmt_epoch_utc(epoch_secs: i64) -> String {
+fn fmt_epoch(epoch_secs: i64) -> String {
 
     let days = epoch_secs.div_euclid(86_400);
-    let secs_of_day = epoch_secs.rem_euclid(86_400);
-    let hour = secs_of_day / 3600;
-    let min = (secs_of_day % 3600) / 60;
-    let sec = secs_of_day % 60;
+    let day_secs = epoch_secs.rem_euclid(86_400);
+    let hour = day_secs / 3600;
+    let min = (day_secs % 3600) / 60;
+    let sec = day_secs % 60;
 
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -250,7 +249,7 @@ fn json_write(v: &Value, out: &mut String) {
                     out.push(',');
                 }
 
-                json_escape(&json_key_str(k), out);
+                json_escape(&json_key(k), out);
                 out.push(':');
                 json_write(val, out);
             }
@@ -261,7 +260,7 @@ fn json_write(v: &Value, out: &mut String) {
     }
 }
 
-fn json_key_str(k: &Value) -> String {
+fn json_key(k: &Value) -> String {
     match k {
         Value::Str(s) => s.to_string(),
         Value::Int(_) | Value::Float(_) => json_num(k),
@@ -271,19 +270,19 @@ fn json_key_str(k: &Value) -> String {
     }
 }
 
-fn json_skip_ws(b: &[u8], pos: &mut usize) {
+fn json_ws(b: &[u8], pos: &mut usize) {
     while *pos < b.len() && matches!(b[*pos], b' ' | b'\t' | b'\n' | 0x0d) {
         *pos += 1;
     }
 }
 
-fn json_parse_value(b: &[u8], pos: &mut usize) -> Option<Value> {
-    json_skip_ws(b, pos);
+fn json_val(b: &[u8], pos: &mut usize) -> Option<Value> {
+    json_ws(b, pos);
     if *pos >= b.len() {
         return None;
     }
     match b[*pos] {
-        b'"' => json_parse_string(b, pos).map(str_val),
+        b'"' => json_str(b, pos).map(str_val),
         b'{' => parse_obj(b, pos),
         b'[' => parse_arr(b, pos),
         b'-' | b'0'..=b'9' => parse_num(b, pos),
@@ -303,7 +302,7 @@ fn json_parse_value(b: &[u8], pos: &mut usize) -> Option<Value> {
     }
 }
 
-fn json_parse_string(b: &[u8], pos: &mut usize) -> Option<String> {
+fn json_str(b: &[u8], pos: &mut usize) -> Option<String> {
 
     *pos += 1;
     let mut s = String::new();
@@ -385,15 +384,15 @@ fn parse_num(b: &[u8], pos: &mut usize) -> Option<Value> {
 fn parse_arr(b: &[u8], pos: &mut usize) -> Option<Value> {
     *pos += 1;
     let items: std::rc::Rc<std::cell::RefCell<Vec<Value>>> = Default::default();
-    json_skip_ws(b, pos);
+    json_ws(b, pos);
     if *pos < b.len() && b[*pos] == b']' {
         *pos += 1;
         return Some(Value::List(items));
     }
     loop {
-        let el = json_parse_value(b, pos)?;
+        let el = json_val(b, pos)?;
         items.borrow_mut().push(el);
-        json_skip_ws(b, pos);
+        json_ws(b, pos);
         if *pos >= b.len() {
             return None;
         }
@@ -414,26 +413,26 @@ fn parse_arr(b: &[u8], pos: &mut usize) -> Option<Value> {
 fn parse_obj(b: &[u8], pos: &mut usize) -> Option<Value> {
     *pos += 1;
     let mut pairs: Vec<(Value, Value)> = Vec::new();
-    json_skip_ws(b, pos);
+    json_ws(b, pos);
     if *pos < b.len() && b[*pos] == b'}' {
         *pos += 1;
         return Some(Value::Map(crate::interp::lumen_map(pairs)));
     }
     loop {
-        json_skip_ws(b, pos);
+        json_ws(b, pos);
         if *pos >= b.len() || b[*pos] != b'"' {
             return None;
         }
-        let key = json_parse_string(b, pos)?;
-        json_skip_ws(b, pos);
+        let key = json_str(b, pos)?;
+        json_ws(b, pos);
         if *pos >= b.len() || b[*pos] != b':' {
             return None;
         }
         *pos += 1;
-        let val = json_parse_value(b, pos)?;
+        let val = json_val(b, pos)?;
         // lumen_map dedups by key (last wins), matching object semantics.
         pairs.push((Value::Str(std::rc::Rc::new(key)), val));
-        json_skip_ws(b, pos);
+        json_ws(b, pos);
         if *pos >= b.len() {
             return None;
         }
@@ -1143,7 +1142,7 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
         arity: 1,
         symbol: "lumen_time_format",
 
-        eval: |a| Ok(str_val(fmt_epoch_utc(as_f(arg(a, 0)?)? as i64))),
+        eval: |a| Ok(str_val(fmt_epoch(as_f(arg(a, 0)?)? as i64))),
     },
     ModuleFn {
         module: "time",
@@ -1180,9 +1179,9 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
             let s = str_arg(a, 0);
             let bytes = s.as_bytes();
             let mut pos = 0usize;
-            match json_parse_value(bytes, &mut pos) {
+            match json_val(bytes, &mut pos) {
                 Some(v) => {
-                    json_skip_ws(bytes, &mut pos);
+                    json_ws(bytes, &mut pos);
                     if pos == bytes.len() {
                         Ok(v)
                     } else {
@@ -1401,7 +1400,7 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
                 _ => return Err("vcall: args must be a cbuf or nil".into()),
             };
             let ret_kind = int_of(arg(a, 3)?);
-            com_vcall_impl(obj, slot, &args, ret_kind)
+            com_vcall(obj, slot, &args, ret_kind)
         },
     },
 
@@ -1542,7 +1541,7 @@ mod tests {
     use super::{lookup, Value};
 
     #[test]
-    fn math_fns_ok() {
+    fn math_ok() {
         let f = lookup("math", "log2").expect("math.log2 missing");
         assert!(
             matches!((f.eval)(&[Value::Float(8.0)]).unwrap(), Value::Float(x) if (x - 3.0).abs() < 1e-12)
@@ -1588,7 +1587,7 @@ mod tests {
     }
 
     #[test]
-    fn os_fns_ok() {
+    fn os_ok() {
         for name in [
             "setenv", "cwd", "time", "clock", "getpid", "sep", "platform", "system", "exec",
             "exit", "args",
@@ -1598,7 +1597,7 @@ mod tests {
     }
 
     #[test]
-    fn net_fns_ok() {
+    fn net_ok() {
         for (name, arity) in [
             ("listen", 2u8), ("accept", 1), ("connect", 2), ("udp", 2),
             ("send", 2), ("recv", 2), ("sendto", 4), ("recvfrom", 2),
@@ -1661,7 +1660,7 @@ mod tests {
     }
 
     #[test]
-    fn time_fmt_utc() {
+    fn time_utc() {
         let fmt = lookup("time", "format").expect("time.format missing");
         let f = |secs: i64| match (fmt.eval)(&[Value::Int(secs)]).unwrap() {
             Value::Str(s) => s.to_string(),

@@ -580,7 +580,7 @@ impl Interp {
                     .cloned()
                     .ok_or_else(|| format!("internal: unknown closure fn {}", fn_name))?;
                 let mut caps = Vec::with_capacity(captures.len());
-                // Captures are evaluated and stored in source order, and `invoke_with_captures`
+                // Captures are evaluated and stored in source order, and `invoke_cap`
                 // later prepends them to the args in this same order. Native lays out the
                 // closure environment identically, so this ordering is load-bearing.
                 for c in captures {
@@ -1029,10 +1029,10 @@ impl Interp {
 
                             let bytes = s.as_bytes();
                             let mut out = String::with_capacity(s.len());
-                            let mut at_word_start = true;
+                            let mut at_wstart = true;
                             for &b in bytes {
                                 let is_ws = b == b' ' || b == b'\t' || b == b'\n' || b == b'\r';
-                                let c = if at_word_start {
+                                let c = if at_wstart {
                                     if b.is_ascii_lowercase() {
                                         b - 32
                                     } else {
@@ -1044,7 +1044,7 @@ impl Interp {
                                     b
                                 };
                                 out.push(c as char);
-                                at_word_start = is_ws;
+                                at_wstart = is_ws;
                             }
                             return Ok(Value::Str(Rc::new(out)));
                         }
@@ -1074,7 +1074,7 @@ impl Interp {
                             argvals.push(self.eval(a, env)?);
                         }
                         if let Value::Func(def, captured) = callee_val {
-                            return self.invoke_with_captures(&def, argvals, &captured);
+                            return self.invoke_cap(&def, argvals, &captured);
                         }
                         return Err("attempted to call a non-function value".into());
                     }
@@ -1299,7 +1299,7 @@ impl Interp {
                     .cloned()
                     .or_else(|| self.globals.get(&name).cloned())
                 {
-                    return self.invoke_with_captures(&def, argvals, &captured);
+                    return self.invoke_cap(&def, argvals, &captured);
                 }
                 Err(format!("undefined function: {}", name))
             }
@@ -1370,7 +1370,7 @@ impl Interp {
         result
     }
 
-    fn invoke_with_captures(
+    fn invoke_cap(
         &mut self,
         f: &FnDef,
         args: Vec<Value>,
@@ -1487,7 +1487,7 @@ impl Interp {
 
     #[cfg(windows)]
     fn call_extern(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
-        crate::ffi::call_dll_fn(self.externs.get(name).unwrap(), args)
+        crate::ffi::call_dll(self.externs.get(name).unwrap(), args)
     }
     #[cfg(not(windows))]
     fn call_extern(&mut self, _name: &str, _args: &[Value]) -> Result<Value, String> {

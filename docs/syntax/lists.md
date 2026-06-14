@@ -1,6 +1,6 @@
 # Lists
 
-A list is an ordered, growable sequence. The elements can be any type, and they don't have to agree with each other, so mixing numbers and strings in one list is perfectly fine.
+A list is an ordered, growable sequence. Elements can be any type, and they don't have to match, so mixing numbers and strings in one list is fine.
 
 ```lumen
 let xs = [3, 1, 4]
@@ -36,7 +36,7 @@ print(["a","b"].join("-")) # "a-b"  (string elements only)
 
 ## Transforming with functions
 
-`map` and `filter` each take a [function value](functions.md) and hand you back a fresh list. The original is never touched, which is exactly what you want when you're chaining transforms together:
+`map` and `filter` each take a [function value](functions.md) and return a fresh list. The original is never touched, exactly what you want when chaining transforms:
 
 ```lumen
 fn double(x): return x * 2
@@ -52,7 +52,7 @@ print([1, 2, 3].map(sq))             # [1, 4, 9]
 
 ## Slicing
 
-`xs[lo:hi]` returns a half-open slice: it includes `lo` and excludes `hi`. The nice part is that slicing never blows up on you. Bounds clamp to the length, negative indices count back from the end, and either bound can be left off entirely.
+`xs[lo:hi]` returns a half-open slice: it includes `lo` and excludes `hi`. Slicing never blows up. Bounds clamp to the length, negative indices count back from the end, and either bound can be left off.
 
 ```lumen
 let xs = [10, 20, 30, 40, 50]
@@ -72,7 +72,7 @@ Build a whole list from any iterable in a single expression:
 [element for var in iterable if condition]
 ```
 
-The iterable can be a range, a list, or a string. The element and the condition can each be any expression you like, a [ternary](control-flow.md#the-ternary-expression) included. And don't worry about the loop variable: it's scoped to the comprehension and never leaks out into the surrounding code.
+The iterable can be a range, a list, or a string. The element and condition can each be any expression, a [ternary](control-flow.md#the-ternary-expression) included. The loop variable is scoped to the comprehension and never leaks into surrounding code.
 
 ```lumen
 print([x * x for x in 0..6])              # [0, 1, 4, 9, 16, 25]

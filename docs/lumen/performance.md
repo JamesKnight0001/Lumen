@@ -1,115 +1,105 @@
 # How it runs fast
 
-Lumen looks like a scripting language. A compiled Lumen program is not. It keeps
+Lumen looks like a scripting language; a compiled Lumen program isn't. It keeps
 pace with C and Rust on the right workloads and leaves Java, Node, and CPython
-well behind. Here's how, in plain terms. You don't *do* any of this; the compiler
-just does it for you.
+behind. Here's how. You don't do any of this; the compiler does.
 
 ## 1. Values don't touch the heap
 
-Every value is one 64-bit word ([NaN-boxing](memory.md)), and integers, floats,
-booleans, and nil live right inside it. Number-crunching allocates nothing.
-Copies are free. There's no object header to chase and no pointer to follow just
-to read a loop counter.
+Every value is one 64-bit word ([NaN-boxing](memory.md)), with integers, floats,
+booleans, and nil stored inline. Number-crunching allocates nothing, copies are
+free, and there's no object header or pointer to chase to read a loop counter.
 
 ## 2. It emits real machine code
 
-`lumen build` doesn't hand a virtual machine some bytecode to chew through at
-runtime. It writes x86-64 assembly, and GCC turns that into a native executable.
-No dispatch loop, no "which opcode is this" check on every operation. Just
-instructions the CPU runs directly.
+`lumen build` doesn't feed bytecode to a VM. By default it emits **LLVM IR** and
+links it with clang + lld (`--backend asm` writes x86-64 assembly + gcc instead,
+same byte-identical output, used when no LLVM toolchain is present). No dispatch
+loop, no per-op opcode check, just instructions the CPU runs directly.
 
 ## 3. A thin, optimized C runtime
 
-A few things genuinely need real code: heap allocation, the GC, the string and
-list helpers. Those live in a small C runtime, compiled at `-O2` and linked
-straight into your program. Lean on purpose.
+Heap allocation, the GC, and the string/list helpers need real code. They live in
+a small C runtime compiled at `-O2` and linked into your program. Lean on purpose.
 
 ## 4. Unboxed numeric fast paths (the big one)
 
-This is where most of the speed comes from. Before it generates any code, the
-compiler runs a whole-program analysis that proves which variables and parameters
-are *always* integers or *always* floats. Those skip boxing entirely:
+Most of the speed lives here. A whole-program analysis proves which variables and
+parameters are *always* int or *always* float, and those skip boxing:
 
-- A proven-integer local lives as a raw `i64` in a register or stack slot, and
-  `a + b` compiles to a bare `add`/`imul`. No tag check, no runtime call.
-- A proven-float local lives in an SSE register; arithmetic becomes `addsd` /
-  `mulsd` directly.
-- A list proven to hold only floats has its `a[i]` reads compiled to a direct
-  `movsd` from contiguous memory; a list proven to hold only **integers** gets
-  an inline bounds-checked `mov` + unbox, skipping the `lumen_index_get` runtime
-  dispatch entirely (this is the S3 work - about +60% on int-list-heavy loops).
-- A reduction accumulator in a `for` loop (`total = total + …`) is hoisted into a
-  callee-saved register for the whole loop instead of being written back to its
-  stack slot every iteration (the S10 work - about +23% on accumulator loops).
-- `x % 2^k` with a constant power-of-two divisor compiles to a sign-correct mask
-  (a few shifts + an `and`) instead of a divide, matching the interpreter's
-  remainder bit-for-bit including for negatives (the S11 work - about +19% on
-  modulo-heavy loops like collatz).
-- Self-recursive tail calls become plain loops, and small functions get inlined.
-- A recursive function's base case can return *before* its stack frame is even
-  built, which on something like `fib` is roughly half of all calls.
+- A proven-int local lives as a raw `i64`, so `a + b` is a bare `add`/`imul`. No
+  tag check, no runtime call.
+- A proven-float local lives in an SSE register; arithmetic is `addsd`/`mulsd`.
+- A float-only list reads `a[i]` as a direct `movsd`; an int-only list gets an
+  inline bounds-checked `mov` + unbox, skipping the `lumen_index_get` dispatch
+  (about +60% on int-list loops).
+- A loop accumulator (`total = total + …`) stays raw `i64` in its slot for the
+  whole loop, so it accumulates with a bare `add`, no per-iteration box/unbox.
+  This lands the integer loop at ~1.1× C.
+- `x % 2^k` with a power-of-two constant compiles to a sign-correct mask (shifts
+  + `and`), not a divide, matching the interpreter bit-for-bit including negatives.
+- Self-recursive tail calls become loops, and small functions inline.
+- A recursive base case can return *before* its stack frame is built (roughly half
+  of all `fib` calls).
+- The NaN-box conversion helpers are pure, tagged `memory(none)`, so LLVM deletes
+  dead boxes (e.g. an unused loop counter) and hoists invariant ones. This brings
+  the float reduction to ~1.03× C.
+
+## 4b. Short-lived objects skip the GC heap
+
+Escape analysis proves which lists, maps, structs, and comprehensions never leave
+the function that builds them. Those are **bump-allocated in a per-call arena** and
+freed on return: no GC tracking, no individual frees, deterministic cleanup at
+scope exit. It's Rust's ownership win (no leaks, no use-after-free, freed at scope
+end) with no annotations. Anything that might escape falls back to the GC heap, so
+it's never wrong, just faster on the common case.
 
 ## 5. The optimizer runs to a fixpoint
 
-`optimize_program` runs its inline → const-fold → CSE → dead-code passes in a
-bounded loop until the program stops changing, instead of a single pass. Each
-pass is semantics-preserving, so iterating only catches the work an earlier pass
-exposed - a fold that unlocks an inline that unlocks another fold. Same output,
-strictly less generated code (the S5 work).
+`optimize_program` loops its inline -> const-fold -> CSE -> dead-code passes until
+the program stops changing. Each pass is semantics-preserving, so iterating catches
+work an earlier pass exposed: a fold unlocks an inline that unlocks another fold.
+Same output, less generated code.
 
 ## What that buys you
 
-Measured on this machine (Windows, mingw64 gcc 15.2.0, rustc 1.96, Java 25,
-Node 24, CPython 3.12). Medians of repeated runs with warmup discarded; every
-program's output is byte-identical across all languages, because it's the same
-program. Absolute numbers shift per machine - the ratios are the point.
+Measured on Windows (LLVM/clang 21.1.6, mingw64 gcc 16.1, rustc 1.96, OpenJDK 25,
+Node 24, CPython 3.14). Best-of-5 wall-clock; output is byte-identical across all
+languages, and Lumen's interpreter, LLVM build, and asm build agree to the byte.
+Absolute numbers shift per machine; the ratios are the point. Harness: `bench/bench.py`.
 
-### Fair scalar workloads (the honest comparison)
+| Workload | Lumen | C `-O2` | Rust `-O` | Node | Python |
+|----------|------:|--------:|----------:|-----:|-------:|
+| `fib(35)` recursion          | **~57 ms**  | ~22 ms | ~30 ms | ~177 ms | ~1210 ms |
+| float reduce, 5×10⁷          | **~56 ms**  | ~54 ms | ~56 ms | ~111 ms | ~4680 ms |
+| int loop + modulo, 5×10⁷     | **~60 ms**  | ~56 ms | ~58 ms | ~168 ms | ~4900 ms |
+| hash-map build+lookup, 10⁶   | **~57 ms**  | ~15 ms | ~46 ms | ~111 ms |  ~170 ms |
 
-These are loops the C/Rust compilers **cannot** constant-fold or auto-vectorize
-away, so it's genuinely Lumen's scalar code vs theirs:
+The two tight loops are the headline: **float reduction ~1.03× C, integer loop
+~1.1× C**, effectively tied with the native compilers (and faster than Lumen's own
+asm backend on the int loop). Recursion is ~2.6× C (call overhead), hash-maps ~3× C
+(hashing + heap). Against managed runtimes it isn't close: ~2-3× faster than Node,
+12-85× faster than CPython.
 
-| Workload | Lumen 0.77 | C `-O2` | Rust `-O` | Node | Python |
-|----------|-----------|---------|-----------|------|--------|
-| `fib(34)` recursion          | **~32 ms**  | ~15 ms | ~21 ms | ~117 ms | ~1132 ms |
-| collatz (branchy, data-dependent) | **~139 ms** | ~52 ms | ~35 ms | ~282 ms | ~3220 ms |
-
-On recursion Lumen is ~2× C and ahead of Rust-less-so but well ahead of Node and
-Python. On collatz - a deliberately un-optimizable, branch-heavy scalar loop -
-Lumen is ~2.7× C, ~4× Rust, **2× faster than Node, and ~23× faster than Python.**
-That's the real shape of it: ~2-3× off the native compilers on honest scalar
-code, decisively faster than every interpreter.
-
-### Container workloads
-
-| Workload | Lumen 0.77 | C `-O2` | Rust `-O` | Node | Python |
-|----------|-----------|---------|-----------|------|--------|
-| int-list sum, 100M reads | **~225 ms** | ~21 ms† | ~15 ms† | ~182 ms | ~8975 ms |
-
-The int-list reductions are where S3 shows up: 0.75 ran this in ~549 ms, 0.77
-runs it in ~225 ms - a **2.4× generational speedup**, now ahead of Node and ~40×
-ahead of Python.
+So: tied with C on hot numeric loops, a small constant factor off on recursion and
+containers, decisively faster than every interpreter, all from a dynamically-typed
+language running the same source unchanged under its own interpreter.
 
 ### Read the daggers honestly
 
-The `*`/`†` cases are where C and Rust look untouchable, and it's worth being
-precise about *why*:
+Where C and Rust pull ahead, precisely why:
 
-- **Auto-vectorization.** On the int-list sum, gcc and rustc emit SIMD (`paddq`,
-  processing multiple elements per instruction). Lumen emits honest scalar loads.
-  Matching this needs a vectorizer, which Lumen does not have.
-- **Whole-loop constant folding.** On a closed-form reduction like
-  `sum(i for i in 0..1e8)`, gcc computes the answer at compile time and emits a
-  single `movabsq` - the loop is *gone* from the binary. That "5 ms" isn't C
-  running a fast loop; it's C running no loop. Comparing against it is comparing
-  against the absence of work.
+- **Recursion call overhead.** Lumen's calls pass NaN-boxed values through the
+  boxed ABI, so each `fib` call boxes its argument and result. That's the ~2.6× gap.
+- **Auto-vectorization & constant folding.** On SIMD-friendly or closed-form
+  reductions, gcc/rustc emit `paddq`/`movabsq`, processing many elements per
+  instruction or computing the answer at compile time and emitting *no loop*.
+  Comparing against a deleted loop is comparing against the absence of work.
+- **Hash-map throughput.** The map benchmark is dominated by the runtime's hash +
+  probe; C's inlined open-addressing table is just tighter.
 
-Neither is Lumen "losing at the same task" - they're the C/Rust compilers
-deleting or transforming the task. Where the work actually has to happen (the
-scalar table above), Lumen is within a small constant factor and the goal -
-"meet C on the hot path, beat every managed language" - holds. These docs won't
-pretend otherwise.
+Scalar-for-scalar (the two loop rows), Lumen is within ~10% of C. The goal, "meet C
+on the hot path, beat every managed language," holds.
 
 ### Reproduce it
 
@@ -122,6 +112,6 @@ python bench/bench.py
 
 ## A note on the FFI
 
-Every foreign-function feature (calling DLLs, building structs, COM, callbacks)
-lives deliberately on the *cold* path. None of it touches the hot numeric code
-generation above. Adding the entire DirectX story cost the benchmarks nothing.
+Every foreign-function feature (DLLs, structs, COM, callbacks) lives on the *cold*
+path and never touches the hot numeric codegen. Adding the entire DirectX story
+cost the benchmarks nothing.

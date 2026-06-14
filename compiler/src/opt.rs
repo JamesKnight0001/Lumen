@@ -30,14 +30,14 @@ fn opt_round(prog: &mut Program) {
                 opt_block(&mut f.body);
                 cse_block(&mut f.body);
                 dce_block(&mut f.body);
-                strip_dead_srclines(&mut f.body);
+                strip_srclines(&mut f.body);
             }
             Item::Struct(s) => {
                 for m in s.methods.iter_mut() {
                     opt_block(&mut m.body);
                     cse_block(&mut m.body);
                     dce_block(&mut m.body);
-                    strip_dead_srclines(&mut m.body);
+                    strip_srclines(&mut m.body);
                 }
             }
             Item::Stmt(s) => opt_stmt(s),
@@ -142,7 +142,7 @@ fn expr_calls(e: &Expr, name: &str) -> bool {
     found
 }
 
-fn is_pure_arg(e: &Expr) -> bool {
+fn pure_arg(e: &Expr) -> bool {
     matches!(
         e,
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Nil | Expr::Ident(_)
@@ -268,7 +268,7 @@ fn inline_expr(e: &mut Expr, cands: &HashMap<String, Inlinable>, changed: &mut b
     if let Expr::Call { callee, args } = e {
         if let Expr::Ident(name) = &**callee {
             if let Some(c) = cands.get(name) {
-                if c.params.len() == args.len() && args.iter().all(is_pure_arg) {
+                if c.params.len() == args.len() && args.iter().all(pure_arg) {
                     let map: HashMap<&str, &Expr> = c
                         .params
                         .iter()
@@ -471,26 +471,26 @@ fn opt_block(body: &mut Vec<Stmt>) {
     *body = out;
 }
 
-pub fn strip_dead_srclines(body: &mut Vec<Stmt>) {
+pub fn strip_srclines(body: &mut Vec<Stmt>) {
     for s in body.iter_mut() {
         match s {
             Stmt::If {
                 then, elifs, els, ..
             } => {
-                strip_dead_srclines(then);
+                strip_srclines(then);
                 for (_, b) in elifs.iter_mut() {
-                    strip_dead_srclines(b);
+                    strip_srclines(b);
                 }
                 if let Some(b) = els {
-                    strip_dead_srclines(b);
+                    strip_srclines(b);
                 }
             }
-            Stmt::While { body, .. } | Stmt::For { body, .. } => strip_dead_srclines(body),
+            Stmt::While { body, .. } | Stmt::For { body, .. } => strip_srclines(body),
             Stmt::Try {
                 body, catch_body, ..
             } => {
-                strip_dead_srclines(body);
-                strip_dead_srclines(catch_body);
+                strip_srclines(body);
+                strip_srclines(catch_body);
             }
             _ => {}
         }
@@ -517,16 +517,16 @@ pub fn strip_dead_srclines(body: &mut Vec<Stmt>) {
 
 fn can_fault(s: &Stmt) -> bool {
     match s {
-        Stmt::Let { value, .. } => expr_can_fault(value),
-        Stmt::Assign { target, value } => expr_can_fault(target) || expr_can_fault(value),
-        Stmt::ExprStmt(e) => expr_can_fault(e),
-        Stmt::Return(opt) => opt.as_ref().map(expr_can_fault).unwrap_or(false),
+        Stmt::Let { value, .. } => may_fault(value),
+        Stmt::Assign { target, value } => may_fault(target) || may_fault(value),
+        Stmt::ExprStmt(e) => may_fault(e),
+        Stmt::Return(opt) => opt.as_ref().map(may_fault).unwrap_or(false),
 
         Stmt::If { cond, elifs, .. } => {
-            expr_can_fault(cond) || elifs.iter().any(|(c, _)| expr_can_fault(c))
+            may_fault(cond) || elifs.iter().any(|(c, _)| may_fault(c))
         }
-        Stmt::While { cond, .. } => expr_can_fault(cond),
-        Stmt::For { iter, .. } => expr_can_fault(iter),
+        Stmt::While { cond, .. } => may_fault(cond),
+        Stmt::For { iter, .. } => may_fault(iter),
 
         Stmt::Try { .. } => false,
         Stmt::Raise(_) => true,
@@ -534,17 +534,17 @@ fn can_fault(s: &Stmt) -> bool {
     }
 }
 
-fn expr_can_fault(e: &Expr) -> bool {
+fn may_fault(e: &Expr) -> bool {
     match e {
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Nil | Expr::Str(_) => false,
 
         Expr::Ident(_) | Expr::SelfExpr => false,
         Expr::Unary { op, expr } => match op {
 
-            UnOp::Neg | UnOp::Not => expr_can_fault(expr),
+            UnOp::Neg | UnOp::Not => may_fault(expr),
         },
         Expr::Binary { op, lhs, rhs } => {
-            if expr_can_fault(lhs) || expr_can_fault(rhs) {
+            if may_fault(lhs) || may_fault(rhs) {
                 return true;
             }
             match op {
@@ -555,9 +555,9 @@ fn expr_can_fault(e: &Expr) -> bool {
                 _ => false,
             }
         }
-        Expr::Range { lo, hi } => expr_can_fault(lo) || expr_can_fault(hi),
+        Expr::Range { lo, hi } => may_fault(lo) || may_fault(hi),
         Expr::IfElse { cond, then, els } => {
-            expr_can_fault(cond) || expr_can_fault(then) || expr_can_fault(els)
+            may_fault(cond) || may_fault(then) || may_fault(els)
         }
 
         _ => true,
@@ -605,13 +605,13 @@ fn pick_block(
 
 fn opt_stmt(s: &mut Stmt) {
     match s {
-        Stmt::Let { value, .. } => fold_in_place(value),
+        Stmt::Let { value, .. } => fold_here(value),
         Stmt::Assign { target, value } => {
-            fold_in_place(target);
-            fold_in_place(value);
+            fold_here(target);
+            fold_here(value);
         }
-        Stmt::ExprStmt(e) => fold_in_place(e),
-        Stmt::Return(Some(e)) => fold_in_place(e),
+        Stmt::ExprStmt(e) => fold_here(e),
+        Stmt::Return(Some(e)) => fold_here(e),
         Stmt::Return(None) => {}
         Stmt::If {
             cond,
@@ -619,10 +619,10 @@ fn opt_stmt(s: &mut Stmt) {
             elifs,
             els,
         } => {
-            fold_in_place(cond);
+            fold_here(cond);
             opt_block(then);
             for (c, b) in elifs.iter_mut() {
-                fold_in_place(c);
+                fold_here(c);
                 opt_block(b);
             }
             if let Some(b) = els {
@@ -631,11 +631,11 @@ fn opt_stmt(s: &mut Stmt) {
 
         }
         Stmt::While { cond, body } => {
-            fold_in_place(cond);
+            fold_here(cond);
             opt_block(body);
         }
         Stmt::For { iter, body, .. } => {
-            fold_in_place(iter);
+            fold_here(iter);
             opt_block(body);
         }
         Stmt::Try {
@@ -644,61 +644,61 @@ fn opt_stmt(s: &mut Stmt) {
             opt_block(body);
             opt_block(catch_body);
         }
-        Stmt::Raise(e) => fold_in_place(e),
+        Stmt::Raise(e) => fold_here(e),
         Stmt::Break | Stmt::Continue => {}
         Stmt::SrcLine(_) => {}
     }
 }
 
-fn fold_in_place(e: &mut Expr) {
+fn fold_here(e: &mut Expr) {
     match e {
-        Expr::Unary { expr, .. } => fold_in_place(expr),
+        Expr::Unary { expr, .. } => fold_here(expr),
         Expr::Binary { lhs, rhs, .. } => {
-            fold_in_place(lhs);
-            fold_in_place(rhs);
+            fold_here(lhs);
+            fold_here(rhs);
         }
         Expr::Call { callee, args } => {
-            fold_in_place(callee);
+            fold_here(callee);
             for a in args.iter_mut() {
-                fold_in_place(a);
+                fold_here(a);
             }
         }
         Expr::NamedCall { callee, args } => {
-            fold_in_place(callee);
+            fold_here(callee);
             for (_, a) in args.iter_mut() {
-                fold_in_place(a);
+                fold_here(a);
             }
         }
         Expr::Method { obj, args, .. } => {
-            fold_in_place(obj);
+            fold_here(obj);
             for a in args.iter_mut() {
-                fold_in_place(a);
+                fold_here(a);
             }
         }
-        Expr::Field { obj, .. } => fold_in_place(obj),
+        Expr::Field { obj, .. } => fold_here(obj),
         Expr::Index { obj, index } => {
-            fold_in_place(obj);
-            fold_in_place(index);
+            fold_here(obj);
+            fold_here(index);
         }
         Expr::List(xs) => {
             for x in xs.iter_mut() {
-                fold_in_place(x);
+                fold_here(x);
             }
         }
         Expr::Map(kvs) => {
             for (k, v) in kvs.iter_mut() {
-                fold_in_place(k);
-                fold_in_place(v);
+                fold_here(k);
+                fold_here(v);
             }
         }
         Expr::Range { lo, hi } => {
-            fold_in_place(lo);
-            fold_in_place(hi);
+            fold_here(lo);
+            fold_here(hi);
         }
         Expr::FStr(parts) => {
             for p in parts.iter_mut() {
                 if let FStrPart::Expr(pe) = p {
-                    fold_in_place(pe);
+                    fold_here(pe);
                 }
             }
         }
@@ -889,8 +889,8 @@ fn dce_block(body: &mut Vec<Stmt>) {
         // on is_removable, not just the read count.
         let remove = if let Stmt::Let { name, value, .. } = &body[i] {
             is_removable(value)
-                && count_reads_block(name, body) == 0
-                && count_assigns_block(name, body) == 0
+                && count_reads(name, body) == 0
+                && count_assigns(name, body) == 0
         } else {
             false
         };
@@ -913,23 +913,23 @@ fn is_removable(e: &Expr) -> bool {
     }
 }
 
-fn count_reads_block(name: &str, body: &[Stmt]) -> usize {
-    body.iter().map(|s| reads_in_stmt(name, s)).sum()
+fn count_reads(name: &str, body: &[Stmt]) -> usize {
+    body.iter().map(|s| reads_stmt(name, s)).sum()
 }
 
-fn reads_in_stmt(name: &str, s: &Stmt) -> usize {
+fn reads_stmt(name: &str, s: &Stmt) -> usize {
     match s {
-        Stmt::Let { value, .. } => reads_in_expr(name, value),
+        Stmt::Let { value, .. } => reads_expr(name, value),
         Stmt::Assign { target, value } => {
 
             let t = match target {
                 Expr::Ident(_) => 0,
-                other => reads_in_expr(name, other),
+                other => reads_expr(name, other),
             };
-            t + reads_in_expr(name, value)
+            t + reads_expr(name, value)
         }
-        Stmt::ExprStmt(e) => reads_in_expr(name, e),
-        Stmt::Return(Some(e)) => reads_in_expr(name, e),
+        Stmt::ExprStmt(e) => reads_expr(name, e),
+        Stmt::Return(Some(e)) => reads_expr(name, e),
         Stmt::Return(None) => 0,
         Stmt::If {
             cond,
@@ -937,31 +937,31 @@ fn reads_in_stmt(name: &str, s: &Stmt) -> usize {
             elifs,
             els,
         } => {
-            let mut n = reads_in_expr(name, cond) + count_reads_block(name, then);
+            let mut n = reads_expr(name, cond) + count_reads(name, then);
             for (c, b) in elifs {
-                n += reads_in_expr(name, c) + count_reads_block(name, b);
+                n += reads_expr(name, c) + count_reads(name, b);
             }
             if let Some(b) = els {
-                n += count_reads_block(name, b);
+                n += count_reads(name, b);
             }
             n
         }
-        Stmt::While { cond, body } => reads_in_expr(name, cond) + count_reads_block(name, body),
+        Stmt::While { cond, body } => reads_expr(name, cond) + count_reads(name, body),
         Stmt::For { var, iter, body } => {
 
             let _ = var;
-            reads_in_expr(name, iter) + count_reads_block(name, body)
+            reads_expr(name, iter) + count_reads(name, body)
         }
         Stmt::Try {
             body, catch_body, ..
-        } => count_reads_block(name, body) + count_reads_block(name, catch_body),
-        Stmt::Raise(e) => reads_in_expr(name, e),
+        } => count_reads(name, body) + count_reads(name, catch_body),
+        Stmt::Raise(e) => reads_expr(name, e),
         Stmt::Break | Stmt::Continue => 0,
         Stmt::SrcLine(_) => 0,
     }
 }
 
-fn reads_in_expr(name: &str, e: &Expr) -> usize {
+fn reads_expr(name: &str, e: &Expr) -> usize {
     match e {
         Expr::Ident(n) => (n == name) as usize,
         Expr::Int(_)
@@ -970,64 +970,64 @@ fn reads_in_expr(name: &str, e: &Expr) -> usize {
         | Expr::Bool(_)
         | Expr::Nil
         | Expr::SelfExpr => 0,
-        Expr::Unary { expr, .. } => reads_in_expr(name, expr),
-        Expr::Binary { lhs, rhs, .. } => reads_in_expr(name, lhs) + reads_in_expr(name, rhs),
+        Expr::Unary { expr, .. } => reads_expr(name, expr),
+        Expr::Binary { lhs, rhs, .. } => reads_expr(name, lhs) + reads_expr(name, rhs),
         Expr::Call { callee, args } => {
-            reads_in_expr(name, callee) + args.iter().map(|a| reads_in_expr(name, a)).sum::<usize>()
+            reads_expr(name, callee) + args.iter().map(|a| reads_expr(name, a)).sum::<usize>()
         }
         Expr::NamedCall { callee, args } => {
-            reads_in_expr(name, callee)
+            reads_expr(name, callee)
                 + args
                     .iter()
-                    .map(|(_, a)| reads_in_expr(name, a))
+                    .map(|(_, a)| reads_expr(name, a))
                     .sum::<usize>()
         }
         Expr::Method { obj, args, .. } => {
-            reads_in_expr(name, obj) + args.iter().map(|a| reads_in_expr(name, a)).sum::<usize>()
+            reads_expr(name, obj) + args.iter().map(|a| reads_expr(name, a)).sum::<usize>()
         }
-        Expr::Field { obj, .. } => reads_in_expr(name, obj),
-        Expr::Index { obj, index } => reads_in_expr(name, obj) + reads_in_expr(name, index),
-        Expr::List(xs) => xs.iter().map(|x| reads_in_expr(name, x)).sum(),
+        Expr::Field { obj, .. } => reads_expr(name, obj),
+        Expr::Index { obj, index } => reads_expr(name, obj) + reads_expr(name, index),
+        Expr::List(xs) => xs.iter().map(|x| reads_expr(name, x)).sum(),
         Expr::Map(kvs) => kvs
             .iter()
-            .map(|(k, v)| reads_in_expr(name, k) + reads_in_expr(name, v))
+            .map(|(k, v)| reads_expr(name, k) + reads_expr(name, v))
             .sum(),
-        Expr::Range { lo, hi } => reads_in_expr(name, lo) + reads_in_expr(name, hi),
+        Expr::Range { lo, hi } => reads_expr(name, lo) + reads_expr(name, hi),
         Expr::IfElse { cond, then, els } => {
-            reads_in_expr(name, cond) + reads_in_expr(name, then) + reads_in_expr(name, els)
+            reads_expr(name, cond) + reads_expr(name, then) + reads_expr(name, els)
         }
         Expr::ListComp {
             elem, iter, cond, ..
         } => {
 
-            reads_in_expr(name, elem)
-                + reads_in_expr(name, iter)
-                + cond.as_ref().map_or(0, |c| reads_in_expr(name, c))
+            reads_expr(name, elem)
+                + reads_expr(name, iter)
+                + cond.as_ref().map_or(0, |c| reads_expr(name, c))
         }
         Expr::Slice { obj, lo, hi } => {
-            reads_in_expr(name, obj)
-                + lo.as_ref().map_or(0, |e| reads_in_expr(name, e))
-                + hi.as_ref().map_or(0, |e| reads_in_expr(name, e))
+            reads_expr(name, obj)
+                + lo.as_ref().map_or(0, |e| reads_expr(name, e))
+                + hi.as_ref().map_or(0, |e| reads_expr(name, e))
         }
 
         Expr::Lambda { .. } => 0,
 
-        Expr::Closure { captures, .. } => captures.iter().map(|c| reads_in_expr(name, c)).sum(),
+        Expr::Closure { captures, .. } => captures.iter().map(|c| reads_expr(name, c)).sum(),
         Expr::FStr(parts) => parts
             .iter()
             .map(|p| match p {
-                FStrPart::Expr(pe) => reads_in_expr(name, pe),
+                FStrPart::Expr(pe) => reads_expr(name, pe),
                 FStrPart::Lit(_) => 0,
             })
             .sum(),
     }
 }
 
-fn count_assigns_block(name: &str, body: &[Stmt]) -> usize {
-    body.iter().map(|s| assigns_in_stmt(name, s)).sum()
+fn count_assigns(name: &str, body: &[Stmt]) -> usize {
+    body.iter().map(|s| stmt_assigns(name, s)).sum()
 }
 
-fn assigns_in_stmt(name: &str, s: &Stmt) -> usize {
+fn stmt_assigns(name: &str, s: &Stmt) -> usize {
     match s {
         Stmt::Assign {
             target: Expr::Ident(n),
@@ -1036,19 +1036,19 @@ fn assigns_in_stmt(name: &str, s: &Stmt) -> usize {
         Stmt::If {
             then, elifs, els, ..
         } => {
-            let mut n = count_assigns_block(name, then);
+            let mut n = count_assigns(name, then);
             for (_, b) in elifs {
-                n += count_assigns_block(name, b);
+                n += count_assigns(name, b);
             }
             if let Some(b) = els {
-                n += count_assigns_block(name, b);
+                n += count_assigns(name, b);
             }
             n
         }
-        Stmt::While { body, .. } | Stmt::For { body, .. } => count_assigns_block(name, body),
+        Stmt::While { body, .. } | Stmt::For { body, .. } => count_assigns(name, body),
         Stmt::Try {
             body, catch_body, ..
-        } => count_assigns_block(name, body) + count_assigns_block(name, catch_body),
+        } => count_assigns(name, body) + count_assigns(name, catch_body),
         _ => 0,
     }
 }
@@ -1098,7 +1098,7 @@ fn cse_block(body: &mut Vec<Stmt>) {
 
 fn cse_stmt(s: &mut Stmt, assigned: &HashSet<String>, counter: &mut u32) -> Vec<Stmt> {
     let mut counts: HashMap<String, (Expr, usize)> = HashMap::new();
-    each_expr_in_stmt(s, &mut |e| collect_cse(e, assigned, &mut counts));
+    each_expr(s, &mut |e| collect_cse(e, assigned, &mut counts));
 
     let mut hoistable: Vec<(String, Expr)> = counts
         .into_iter()
@@ -1110,13 +1110,13 @@ fn cse_stmt(s: &mut Stmt, assigned: &HashSet<String>, counter: &mut u32) -> Vec<
     let mut hoists = Vec::new();
     for (key, expr) in hoistable {
         let mut occ = 0usize;
-        each_expr_in_stmt(s, &mut |e| occ += count_occurrences(e, &key));
+        each_expr(s, &mut |e| occ += count_occurrences(e, &key));
         if occ < 2 {
             continue;
         }
         let name = format!("__cse_{}", *counter);
         *counter += 1;
-        each_expr_in_stmt(s, &mut |e| replace_occurrences(e, &key, &name));
+        each_expr(s, &mut |e| replace_occurrences(e, &key, &name));
         hoists.push(Stmt::Let {
             name,
             mutable: false,
@@ -1173,7 +1173,7 @@ fn collect_cse(
 }
 
 fn count_occurrences(e: &Expr, key: &str) -> usize {
-    if expr_matches_key(e, key) {
+    if expr_match(e, key) {
         return 1;
     }
     let mut n = 0;
@@ -1182,14 +1182,14 @@ fn count_occurrences(e: &Expr, key: &str) -> usize {
 }
 
 fn replace_occurrences(e: &mut Expr, key: &str, name: &str) {
-    if expr_matches_key(e, key) {
+    if expr_match(e, key) {
         *e = Expr::Ident(name.to_string());
         return;
     }
-    walk_kids_mut(e, &mut |c| replace_occurrences(c, key, name));
+    walk_kidsm(e, &mut |c| replace_occurrences(c, key, name));
 }
 
-fn expr_matches_key(e: &Expr, key: &str) -> bool {
+fn expr_match(e: &Expr, key: &str) -> bool {
     structural_key(e).as_deref() == Some(key)
 }
 
@@ -1274,7 +1274,7 @@ fn walk_kids(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     }
 }
 
-fn walk_kids_mut(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
+fn walk_kidsm(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
     match e {
         Expr::Unary { expr, .. } => f(expr),
         Expr::Binary { op, lhs, rhs } => {
@@ -1338,7 +1338,7 @@ fn walk_kids_mut(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
     }
 }
 
-fn each_expr_in_stmt(s: &mut Stmt, f: &mut dyn FnMut(&mut Expr)) {
+fn each_expr(s: &mut Stmt, f: &mut dyn FnMut(&mut Expr)) {
     match s {
         Stmt::Let { value, .. } => f(value),
         Stmt::Assign { target, value } => {

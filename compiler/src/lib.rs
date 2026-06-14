@@ -1,4 +1,3 @@
-
 //! Crate root for the Lumen compiler. Wires the front end together: lex,
 //! parse, resolve imports, desugar, lambda-lift, then optionally optimize.
 //! `compile` is the one entry point both backends (interp, codegen) consume.
@@ -11,6 +10,7 @@ pub mod builtins;
 pub mod codegen;
 pub mod defaults;
 pub mod desugar;
+pub mod escape;
 #[cfg(windows)]
 pub mod ffi;
 pub mod http;
@@ -18,6 +18,8 @@ pub mod imports;
 pub mod interp;
 pub mod lexer;
 pub mod lift;
+pub mod llvm;
+pub mod llvmgen;
 pub mod mir;
 pub mod net;
 pub mod opt;
@@ -30,7 +32,6 @@ use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub enum CompileError {
-
     Lex(String),
 
     Parse(String),
@@ -61,7 +62,7 @@ pub fn parse_program(src: &str) -> Result<ast::Program, CompileError> {
 
 // Parse + collect declaration name spans (tooling/LSP). Separate entry so the
 // normal compile path stays byte-for-byte unchanged. Returns (program, decls).
-pub fn parse_program_spanned(
+pub fn parse_spanned(
     src: &str,
 ) -> Result<(ast::Program, Vec<ast::DeclSpan>), CompileError> {
     let toks = lexer::Lexer::new(src)
@@ -92,6 +93,7 @@ pub fn compile(src: &str, base_dir: &Path, optimize: bool) -> Result<ast::Progra
         imported.append(&mut program);
         program = imported;
     }
+    dedupe_fns(&mut program);
 
     defaults::expand_program(&mut program)?;
     desugar::desugar_program(&mut program);
@@ -100,4 +102,30 @@ pub fn compile(src: &str, base_dir: &Path, optimize: bool) -> Result<ast::Progra
         opt::optimize_program(&mut program);
     }
     Ok(program)
+}
+
+// Drop duplicate top-level functions, keeping the LAST definition of each name.
+// The interpreter registers decls into a map (last wins), so two modules that
+// both define `near` resolve to the later one; the compiled backends emit every
+// definition and would hit duplicate-symbol errors. Deduping here makes all
+// three backends agree. Only free functions collide this way - structs, methods,
+// and externs are namespaced separately.
+fn dedupe_fns(program: &mut ast::Program) {
+    use std::collections::HashMap;
+    // index of the last Item::Fn for each name
+    let mut last: HashMap<String, usize> = HashMap::new();
+    for (i, item) in program.iter().enumerate() {
+        if let ast::Item::Fn(f) = item {
+            last.insert(f.name.clone(), i);
+        }
+    }
+    let mut i = 0;
+    program.retain(|item| {
+        let keep = match item {
+            ast::Item::Fn(f) => last.get(&f.name) == Some(&i),
+            _ => true,
+        };
+        i += 1;
+        keep
+    });
 }
