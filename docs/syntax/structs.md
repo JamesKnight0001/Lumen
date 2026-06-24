@@ -60,3 +60,36 @@ The `-> f64` on `length` is an optional return-type annotation. Leave it off (as
   [garbage-collected](../lumen/memory.md) when unreachable.
 - Need a C struct to hand to a DLL? That's different: a raw byte buffer via the
   [`cffi` module](stdlib.md#the-cffi-module), not a Lumen `struct`.
+
+## Enums
+
+An `enum` names a fixed set of related constants. Each variant is one bare name
+on its own line:
+
+```lumen
+enum Color:
+    Red
+    Green
+    Blue
+```
+
+Refer to a variant as `Color.Red`. Variants are plain comparable values, so they
+work with `==`, in `match`, as map keys, and in lists:
+
+```lumen
+fn warmth(c):
+    match c:
+        case Color.Red:
+            return "warm"
+        case Color.Green, Color.Blue:
+            return "cool"
+
+let c = Color.Blue
+print(warmth(c))            # cool
+print(c == Color.Blue)      # true
+```
+
+Using a name that is not a declared variant (`Color.Pink`) is a compile error,
+which catches typos a raw string tag would not. Enums are sugar: each variant is
+a distinct string under the hood, so they behave identically across the
+interpreter and both compiled backends.

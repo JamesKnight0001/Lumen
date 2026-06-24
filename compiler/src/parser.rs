@@ -18,6 +18,9 @@ pub struct Parser {
     // and a counter for the fresh temp names. See plan/match-design.md.
     mprelude: Vec<Stmt>,
     mtemp: usize,
+    // enum NAME { variants }: collected during parse, then a post-parse pass
+    // rewrites `NAME.Variant` to the discriminant string "NAME.Variant".
+    enums: std::collections::HashMap<String, std::collections::HashSet<String>>,
 }
 
 type PResult<T> = Result<T, String>;
@@ -31,6 +34,7 @@ impl Parser {
             cur_parent: None,
             mprelude: Vec::new(),
             mtemp: 0,
+            enums: std::collections::HashMap::new(),
         }
     }
 
@@ -43,6 +47,7 @@ impl Parser {
             cur_parent: None,
             mprelude: Vec::new(),
             mtemp: 0,
+            enums: std::collections::HashMap::new(),
         }
     }
 
@@ -134,6 +139,13 @@ impl Parser {
         let mut items = Vec::new();
         self.skip_newlines();
         while !matches!(self.peek(), Tok::Eof) {
+            // `enum` declares discriminants only; it emits no AST item. Collect
+            // it, then a post-parse pass rewrites NAME.Variant to a string.
+            if matches!(self.peek(), Tok::Enum) {
+                self.parse_enum()?;
+                self.skip_newlines();
+                continue;
+            }
             let line = self.line() as u32;
             let item = self.parse_item()?;
 
@@ -147,6 +159,16 @@ impl Parser {
             }
             items.push(item);
             self.skip_newlines();
+        }
+        // Rewrite every NAME.Variant access into its discriminant string.
+        if !self.enums.is_empty() {
+            let mut err: Option<String> = None;
+            for item in items.iter_mut() {
+                rewrite_enum_item(item, &self.enums, &mut err);
+            }
+            if let Some(e) = err {
+                return Err(e);
+            }
         }
         Ok(items)
     }
@@ -292,6 +314,33 @@ impl Parser {
             fields,
             methods: Vec::new(),
         })
+    }
+
+    // enum NAME: / one bare-ident variant per line. Recorded in self.enums; no
+    // AST item is produced. Variants become the string "NAME.Variant" wherever
+    // NAME.Variant is referenced (rewritten after the whole program parses).
+    fn parse_enum(&mut self) -> PResult<()> {
+        self.expect(&Tok::Enum)?;
+        let name = self.ident()?;
+        self.expect(&Tok::Colon)?;
+        self.expect(&Tok::Newline)?;
+        self.expect(&Tok::Indent)?;
+        let mut variants = std::collections::HashSet::new();
+        while !self.check(&Tok::Dedent) && !self.check(&Tok::Eof) {
+            let v = self.ident()?;
+            if !variants.insert(v.clone()) {
+                return Err(format!("duplicate enum variant {name}.{v}"));
+            }
+            self.skip_newlines();
+        }
+        self.expect(&Tok::Dedent)?;
+        if variants.is_empty() {
+            return Err(format!("enum {name} has no variants"));
+        }
+        if self.enums.insert(name.clone(), variants).is_some() {
+            return Err(format!("enum {name} declared twice"));
+        }
+        Ok(())
     }
 
     fn parse_impl(&mut self) -> PResult<Item> {
@@ -1262,6 +1311,171 @@ fn eq_chain(subj: &Expr, alts: &[Expr]) -> Expr {
     cond
 }
 
+type EnumMap = std::collections::HashMap<String, std::collections::HashSet<String>>;
+
+// Rewrite NAME.Variant field access into the discriminant string "NAME.Variant"
+// across an item. A NAME.field where NAME is a known enum but field is not a
+// variant is a typo: the first such is recorded in `err`.
+fn rewrite_enum_item(item: &mut Item, enums: &EnumMap, err: &mut Option<String>) {
+    match item {
+        Item::Fn(f) => rewrite_enum_block(&mut f.body, enums, err),
+        Item::Struct(s) => {
+            for m in s.methods.iter_mut() {
+                rewrite_enum_block(&mut m.body, enums, err);
+            }
+        }
+        Item::Stmt(s) => rewrite_enum_stmt(s, enums, err),
+        Item::ExternBlock(_) | Item::Import(_) => {}
+    }
+}
+
+fn rewrite_enum_block(body: &mut [Stmt], enums: &EnumMap, err: &mut Option<String>) {
+    for s in body.iter_mut() {
+        rewrite_enum_stmt(s, enums, err);
+    }
+}
+
+fn rewrite_enum_stmt(s: &mut Stmt, enums: &EnumMap, err: &mut Option<String>) {
+    match s {
+        Stmt::Let { value, .. } => rewrite_enum_expr(value, enums, err),
+        Stmt::Assign { target, value } => {
+            rewrite_enum_expr(target, enums, err);
+            rewrite_enum_expr(value, enums, err);
+        }
+        Stmt::ExprStmt(e) => rewrite_enum_expr(e, enums, err),
+        Stmt::Return(Some(e)) => rewrite_enum_expr(e, enums, err),
+        Stmt::Return(None) => {}
+        Stmt::If {
+            cond,
+            then,
+            elifs,
+            els,
+        } => {
+            rewrite_enum_expr(cond, enums, err);
+            rewrite_enum_block(then, enums, err);
+            for (c, b) in elifs.iter_mut() {
+                rewrite_enum_expr(c, enums, err);
+                rewrite_enum_block(b, enums, err);
+            }
+            if let Some(b) = els {
+                rewrite_enum_block(b, enums, err);
+            }
+        }
+        Stmt::While { cond, body } => {
+            rewrite_enum_expr(cond, enums, err);
+            rewrite_enum_block(body, enums, err);
+        }
+        Stmt::For { iter, body, .. } => {
+            rewrite_enum_expr(iter, enums, err);
+            rewrite_enum_block(body, enums, err);
+        }
+        Stmt::Try {
+            body, catch_body, ..
+        } => {
+            rewrite_enum_block(body, enums, err);
+            rewrite_enum_block(catch_body, enums, err);
+        }
+        Stmt::Raise(e) => rewrite_enum_expr(e, enums, err),
+        Stmt::Break | Stmt::Continue | Stmt::SrcLine(_) => {}
+    }
+}
+
+fn rewrite_enum_expr(e: &mut Expr, enums: &EnumMap, err: &mut Option<String>) {
+    // Rewrite a NAME.Variant leaf in place when NAME is a known enum. A field
+    // that is not a variant of that enum is a typo.
+    if let Expr::Field { obj, name } = e {
+        if let Expr::Ident(en) = obj.as_ref() {
+            if let Some(vs) = enums.get(en) {
+                if vs.contains(name) {
+                    *e = Expr::Str(std::rc::Rc::new(format!("{en}.{name}")));
+                    return;
+                }
+                if err.is_none() {
+                    *err = Some(format!("{en} has no variant {name}"));
+                }
+                return;
+            }
+        }
+    }
+    match e {
+        Expr::Unary { expr, .. } => rewrite_enum_expr(expr, enums, err),
+        Expr::Binary { lhs, rhs, .. } => {
+            rewrite_enum_expr(lhs, enums, err);
+            rewrite_enum_expr(rhs, enums, err);
+        }
+        Expr::Call { callee, args } => {
+            rewrite_enum_expr(callee, enums, err);
+            for a in args.iter_mut() {
+                rewrite_enum_expr(a, enums, err);
+            }
+        }
+        Expr::NamedCall { callee, args } => {
+            rewrite_enum_expr(callee, enums, err);
+            for (_, a) in args.iter_mut() {
+                rewrite_enum_expr(a, enums, err);
+            }
+        }
+        Expr::Method { obj, args, .. } => {
+            rewrite_enum_expr(obj, enums, err);
+            for a in args.iter_mut() {
+                rewrite_enum_expr(a, enums, err);
+            }
+        }
+        Expr::Field { obj, .. } => rewrite_enum_expr(obj, enums, err),
+        Expr::Index { obj, index } => {
+            rewrite_enum_expr(obj, enums, err);
+            rewrite_enum_expr(index, enums, err);
+        }
+        Expr::Slice { obj, lo, hi } => {
+            rewrite_enum_expr(obj, enums, err);
+            if let Some(lo) = lo {
+                rewrite_enum_expr(lo, enums, err);
+            }
+            if let Some(hi) = hi {
+                rewrite_enum_expr(hi, enums, err);
+            }
+        }
+        Expr::List(xs) => {
+            for x in xs.iter_mut() {
+                rewrite_enum_expr(x, enums, err);
+            }
+        }
+        Expr::Map(kvs) => {
+            for (k, v) in kvs.iter_mut() {
+                rewrite_enum_expr(k, enums, err);
+                rewrite_enum_expr(v, enums, err);
+            }
+        }
+        Expr::Range { lo, hi } => {
+            rewrite_enum_expr(lo, enums, err);
+            rewrite_enum_expr(hi, enums, err);
+        }
+        Expr::IfElse { cond, then, els } => {
+            rewrite_enum_expr(cond, enums, err);
+            rewrite_enum_expr(then, enums, err);
+            rewrite_enum_expr(els, enums, err);
+        }
+        Expr::ListComp {
+            elem, iter, cond, ..
+        } => {
+            rewrite_enum_expr(elem, enums, err);
+            rewrite_enum_expr(iter, enums, err);
+            if let Some(c) = cond {
+                rewrite_enum_expr(c, enums, err);
+            }
+        }
+        Expr::Lambda { body, .. } => rewrite_enum_block(body, enums, err),
+        Expr::FStr(parts) => {
+            for p in parts.iter_mut() {
+                if let FStrPart::Expr(pe) = p {
+                    rewrite_enum_expr(pe, enums, err);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn parse_fstring(s: &str) -> Vec<FStrPart> {
     let mut parts = Vec::new();
     let mut lit = String::new();
@@ -1541,5 +1755,46 @@ mod tests {
                     && body.iter().filter(|b| matches!(b, crate::ast::Stmt::Let { .. })).count() >= 2
         ));
         assert!(ok, "for should destructure via #d temp: {:?}", f.body);
+    }
+
+    // enum NAME.Variant rewrites to the string "NAME.Variant"; the enum decl
+    // itself produces no AST item.
+    #[test]
+    fn enum_variant_to_string() {
+        let prog = crate::parse_program(
+            "enum Color:\n    Red\n    Green\nfn f():\n    return Color.Green\n",
+        )
+        .unwrap();
+        // no Item for the enum: only the fn (plus SrcLine items)
+        let fns = prog
+            .iter()
+            .filter(|it| matches!(it, crate::ast::Item::Fn(_)))
+            .count();
+        assert_eq!(fns, 1, "one fn, enum emits nothing: {prog:?}");
+        let f = prog
+            .iter()
+            .find_map(|it| match it {
+                crate::ast::Item::Fn(f) => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        let ok = f.body.iter().any(|s| {
+            matches!(
+                s,
+                crate::ast::Stmt::Return(Some(crate::ast::Expr::Str(s))) if &**s == "Color.Green"
+            )
+        });
+        assert!(
+            ok,
+            "Color.Green should be the string discriminant: {:?}",
+            f.body
+        );
+    }
+
+    // Referencing a variant that was not declared is a parse error.
+    #[test]
+    fn enum_unknown_variant_errors() {
+        let r = crate::parse_program("enum C:\n    Red\nfn f():\n    return C.Blue\n");
+        assert!(r.is_err(), "unknown variant should error");
     }
 }

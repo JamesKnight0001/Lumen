@@ -1,0 +1,42 @@
+enum Color:
+    Red
+    Green
+    Blue
+
+enum Shape:
+    Circle
+    Square
+
+fn describe(c):
+    match c:
+        case Color.Red:
+            return "warm"
+        case Color.Green, Color.Blue:
+            return "cool"
+        case _:
+            return "?"
+
+fn area_kind(s):
+    if s == Shape.Circle:
+        return "pi r^2"
+    return "side^2"
+
+fn main():
+    let c = Color.Blue
+    print(c)                      # discriminant string
+    print(describe(c))
+    print(describe(Color.Red))
+    print(Color.Red == Color.Red)
+    print(Color.Red == Color.Green)
+    print(area_kind(Shape.Circle))
+    print(area_kind(Shape.Square))
+
+    # enums as map keys and in lists
+    let m = {Color.Red: 1, Color.Green: 2}
+    print(m[Color.Red])
+    let xs = [Color.Red, Color.Blue, Color.Red]
+    print(xs.count(Color.Red))
+
+    # enum in a struct field, dispatched in a loop
+    for col in [Color.Red, Color.Green, Color.Blue]:
+        print(describe(col))
