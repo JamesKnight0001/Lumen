@@ -98,6 +98,7 @@ A map literal is `{key: value, ...}`; the empty map is `{}`. Index with
 | `m.get(key, default)` | value, or `default` if missing | `{"a":1}.get("z", 0)` -> `0` |
 | `m.keys()` | keys, in insertion order | `{"a":1,"b":2}.keys()` -> `["a","b"]` |
 | `m.values()` | values, in insertion order | `{"a":1,"b":2}.values()` -> `[1,2]` |
+| `m.items()` | `[key, value]` pairs, in insertion order | `{"a":1,"b":2}.items()` -> `[["a",1],["b",2]]` |
 | `m.remove(key)` | delete a key, return its value | `m.remove("a")` -> the value |
 
 Iterating `for k in m:` yields the keys. For the full story, see [maps](maps.md).

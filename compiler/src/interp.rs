@@ -873,6 +873,17 @@ impl Interp {
                             let vs = entries.borrow().values();
                             return Ok(Value::List(Rc::new(RefCell::new(vs))));
                         }
+                        "items" => {
+                            let pairs: Vec<Value> = entries
+                                .borrow()
+                                .pairs()
+                                .iter()
+                                .map(|(k, v)| {
+                                    Value::List(Rc::new(RefCell::new(vec![k.clone(), v.clone()])))
+                                })
+                                .collect();
+                            return Ok(Value::List(Rc::new(RefCell::new(pairs))));
+                        }
                         "has" => {
                             let key = self.eval(&args[0], env)?;
                             return Ok(Value::Bool(entries.borrow().has(&key)));

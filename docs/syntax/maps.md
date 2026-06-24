@@ -49,6 +49,7 @@ print(ages.get("bo", 0))     # 0         (your default)
 let ages = {"ana": 31, "bo": 25, "cy": 41}
 print(ages.keys())       # ["ana", "bo", "cy"]   (insertion order)
 print(ages.values())     # [31, 25, 41]
+print(ages.items())      # [["ana", 31], ["bo", 25], ["cy", 41]]
 print(ages.remove("bo")) # 25    (deletes the key, returns its value)
 ```
 
@@ -65,6 +66,14 @@ for word in ["a", "b", "a"]:
     else:
         counts[word] = 1
 print(counts)            # {"a": 2, "b": 1}
+```
+
+To walk keys and values together, iterate `items()` and
+[destructure](variables.md#destructuring) each pair:
+
+```lumen
+for name, age in ages.items():
+    print(f"{name} is {age}")
 ```
 
 Full method list: [the standard library page](stdlib.md#map-dictionary-methods).

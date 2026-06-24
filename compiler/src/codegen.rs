@@ -2672,6 +2672,7 @@ impl Codegen {
             "pop" => Some("lumen_list_pop"),
             "keys" => Some("lumen_map_keys"),
             "values" => Some("lumen_map_values"),
+            "items" => Some("lumen_map_items"),
             _ => None,
         };
         if let Some(rt) = arg1_method {

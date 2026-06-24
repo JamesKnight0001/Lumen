@@ -2324,6 +2324,7 @@ fn builtin_method(name: &str, nargs: usize) -> Option<(&'static str, usize)> {
         "contains" => "lumen_contains",
         "keys" => "lumen_map_keys",
         "values" => "lumen_map_values",
+        "items" => "lumen_map_items",
         "has" => "lumen_map_has",
         "get" => "lumen_map_get",
         "remove" => "lumen_map_remove",

@@ -1,0 +1,29 @@
+fn main():
+    let m = {"a": 1, "b": 2, "c": 3}
+
+    # items() returns [key, value] pairs in insertion order
+    for kv in m.items():
+        print(kv[0])
+        print(kv[1])
+
+    # the payoff: destructure each pair directly
+    mut sum = 0
+    for k, v in m.items():
+        sum = sum + v
+    print(sum)
+
+    # build a reversed map from items
+    let r = {}
+    for k, v in m.items():
+        r[v] = k
+    print(r[1])
+    print(r[3])
+
+    # items on an empty map
+    let e = {}
+    print(e.items().len())
+
+    # items with int keys
+    let nums = {10: "x", 20: "y"}
+    for k, v in nums.items():
+        print(f"{k}={v}")

@@ -2786,6 +2786,19 @@ LumenVal lumen_map_values(LumenVal mv) {
     for (size_t i = 0; i < m->len; i++) lumen_list_push(out, m->vals[i]);
     return out;
 }
+// items() -> list of [key, value] pairs, in insertion order. Pairs with
+// destructuring so `for k, v in m.items()` works.
+LumenVal lumen_map_items(LumenVal mv) {
+    LumenMap *m = as_map(mv);
+    LumenVal out = lumen_list_new((int64_t)m->len);
+    for (size_t i = 0; i < m->len; i++) {
+        LumenVal pair = lumen_list_new(2);
+        lumen_list_push(pair, m->keys[i]);
+        lumen_list_push(pair, m->vals[i]);
+        lumen_list_push(out, pair);
+    }
+    return out;
+}
 
 LumenVal lumen_map_remove(LumenVal mv, LumenVal key) {
     LumenMap *m = as_map(mv);
