@@ -1,4 +1,4 @@
-# Lumen - BETA V0.78.0
+# Lumen - BETA V0.79.0
 
 A small, fast language with Python-like syntax and a Lua-sized core.
 
@@ -74,8 +74,9 @@ lumen -c 'fn main(): print(2 ** 10)'
 
 * Integers, floats, strings, lists, maps, structs, booleans, `nil`
 * Functions, closures, recursion
-* Structs and methods (`impl`)
-* `if`, `while`, `for`, `break`, `continue`
+* Structs and methods (`impl`), and `enum` types
+* `if`, `while`, `for`, `break`, `continue`, and `match` / `case`
+* List and pair destructuring (`let a, b = pair`, `for k, v in m.items()`)
 * Modules and imports, including relative imports (`.mod` / `..mod`)
 * Default function arguments
 * f-strings
