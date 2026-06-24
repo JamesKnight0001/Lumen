@@ -32,10 +32,13 @@ That's the shape of it: `let` names things, indentation marks blocks, `for i in
 ## What's in the box
 
 - **The values you expect**: integers, floats, booleans, strings, lists, maps,
-  structs, and `nil`. Dynamically typed: you don't annotate your own variables
-  (though FFI declarations name C types).
+  structs, `enum` types, and `nil`. Dynamically typed: you don't annotate your
+  own variables (though FFI declarations name C types).
 - **The control flow you expect**: `if` / `elif` / `else`, `while`, `for`,
-  `break`, `continue`, a ternary `x if cond else y`, and list comprehensions.
+  `break`, `continue`, `match` / `case` pattern matching, a ternary
+  `x if cond else y`, and list comprehensions.
+- **Destructuring**: unpack lists and pairs in one step, e.g. `let a, b = pair`
+  or `for k, v in m.items()`.
 - **Functions as real values**: pass them around, store them in lists and maps,
   return them. Closures capture their surroundings (by value, or by reference
   when mutated), so stateful counters just work.
