@@ -1,0 +1,41 @@
+fn pair():
+    return [3, 4]
+
+fn triple():
+    return [1, 2, 3]
+
+fn main():
+    # multi-return unpack
+    let a, b = pair()
+    print(a)
+    print(b)
+
+    let x, y, z = triple()
+    print(x + y + z)
+
+    # destructure a list literal
+    let p, q = [10, 20]
+    print(p - q)
+
+    # mutable destructure, then reassign
+    mut m, n = [5, 6]
+    m = m + n
+    print(m)
+
+    # pair iteration over a list of lists
+    let pts = [[1, 2], [3, 4], [5, 6]]
+    mut total = 0
+    for px, py in pts:
+        total = total + px * py
+    print(total)
+
+    # nested: destructure inside a loop body that also unpacks
+    for i, row in [[0, 100], [1, 200]]:
+        print(i)
+        print(row)
+
+    # destructure from an expression (method call result)
+    let parts = "a,b".split(",")
+    let first, second = parts
+    print(first)
+    print(second)

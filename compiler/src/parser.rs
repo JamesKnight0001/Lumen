@@ -521,6 +521,38 @@ impl Parser {
             Tok::For => {
                 self.advance();
                 let var = self.ident()?;
+                // `for a, b in xs:` destructures each element into a, b, ...
+                if self.check(&Tok::Comma) {
+                    let mut names = vec![var];
+                    while self.eat(&Tok::Comma) {
+                        names.push(self.ident()?);
+                    }
+                    self.expect(&Tok::In)?;
+                    let iter = self.parse_expr()?;
+                    self.expect(&Tok::Colon)?;
+                    let mut body = self.parse_block()?;
+                    // Bind the loop temp's elements at the top of the body.
+                    let t = format!("#d{}", self.mtemp);
+                    self.mtemp += 1;
+                    let mut binds = Vec::with_capacity(names.len());
+                    for (i, n) in names.into_iter().enumerate() {
+                        binds.push(Stmt::Let {
+                            name: n,
+                            mutable: false,
+                            ty: Type::Unknown,
+                            value: Expr::Index {
+                                obj: Box::new(Expr::Ident(t.clone())),
+                                index: Box::new(Expr::Int(i as i64)),
+                            },
+                        });
+                    }
+                    binds.append(&mut body);
+                    return Ok(Stmt::For {
+                        var: t,
+                        iter,
+                        body: binds,
+                    });
+                }
                 self.expect(&Tok::In)?;
                 let iter = self.parse_expr()?;
                 self.expect(&Tok::Colon)?;
@@ -546,6 +578,18 @@ impl Parser {
             Tok::Let | Tok::Mut => {
                 let mutable = matches!(self.advance(), Tok::Mut);
                 let name = self.ident()?;
+                // Destructuring: `let a, b, ... = expr` binds each element of a
+                // list/tuple-shaped RHS. Lowered here to a temp + indexed lets
+                // (parser-only, so backends stay byte-identical).
+                if self.check(&Tok::Comma) {
+                    let mut names = vec![name];
+                    while self.eat(&Tok::Comma) {
+                        names.push(self.ident()?);
+                    }
+                    self.expect(&Tok::Assign)?;
+                    let value = self.parse_expr()?;
+                    return self.lower_destructure(names, value, mutable);
+                }
                 let ty = if self.eat(&Tok::Colon) {
                     self.parse_type()?
                 } else {
@@ -553,6 +597,7 @@ impl Parser {
                 };
                 self.expect(&Tok::Assign)?;
                 let value = self.parse_expr()?;
+
                 Stmt::Let {
                     name,
                     mutable,
@@ -644,6 +689,42 @@ impl Parser {
             elifs,
             els,
         })
+    }
+
+    // `let a, b, c = expr`: bind RHS to a temp once, then bind each name to an
+    // indexed element. The temp + all-but-last bindings go through mprelude (so
+    // the enclosing block emits them first); the last binding is returned.
+    fn lower_destructure(
+        &mut self,
+        names: Vec<String>,
+        value: Expr,
+        mutable: bool,
+    ) -> PResult<Stmt> {
+        let t = format!("#d{}", self.mtemp);
+        self.mtemp += 1;
+        self.mprelude.push(Stmt::Let {
+            name: t.clone(),
+            mutable: false,
+            ty: Type::Unknown,
+            value,
+        });
+        let n = names.len();
+        for (i, name) in names.into_iter().enumerate() {
+            let bind = Stmt::Let {
+                name,
+                mutable,
+                ty: Type::Unknown,
+                value: Expr::Index {
+                    obj: Box::new(Expr::Ident(t.clone())),
+                    index: Box::new(Expr::Int(i as i64)),
+                },
+            };
+            if i + 1 == n {
+                return Ok(bind);
+            }
+            self.mprelude.push(bind);
+        }
+        unreachable!("destructure always has at least one name")
     }
 
     // match SUBJ: / case PAT [, PAT...] [if GUARD]: BODY / case _ : BODY
@@ -1412,5 +1493,53 @@ mod tests {
             .iter()
             .any(|s| matches!(s, crate::ast::Stmt::Let { name, .. } if name.starts_with("#m")));
         assert!(binds, "subject should be bound to a #m temp: {:?}", f.body);
+    }
+
+    // `let a, b = e` lowers to a #d temp plus one indexed let per name.
+    #[test]
+    fn destructure_let() {
+        let prog = crate::parse_program("fn f(p):\n    let a, b = p\n    return a\n").unwrap();
+        let f = prog
+            .iter()
+            .find_map(|it| match it {
+                crate::ast::Item::Fn(f) => Some(f),
+                _ => None,
+            })
+            .expect("a fn");
+        let temps = f
+            .body
+            .iter()
+            .filter(|s| matches!(s, crate::ast::Stmt::Let { name, .. } if name.starts_with("#d")))
+            .count();
+        let named = f
+            .body
+            .iter()
+            .filter(
+                |s| matches!(s, crate::ast::Stmt::Let { name, .. } if name == "a" || name == "b"),
+            )
+            .count();
+        assert_eq!(temps, 1, "one #d temp: {:?}", f.body);
+        assert_eq!(named, 2, "a and b bound: {:?}", f.body);
+    }
+
+    // `for a, b in xs:` lowers to a for over a #d temp with element binds inside.
+    #[test]
+    fn destructure_for() {
+        let prog =
+            crate::parse_program("fn f(xs):\n    for a, b in xs:\n        print(a)\n").unwrap();
+        let f = prog
+            .iter()
+            .find_map(|it| match it {
+                crate::ast::Item::Fn(f) => Some(f),
+                _ => None,
+            })
+            .expect("a fn");
+        let ok = f.body.iter().any(|s| matches!(
+            s,
+            crate::ast::Stmt::For { var, body, .. }
+                if var.starts_with("#d")
+                    && body.iter().filter(|b| matches!(b, crate::ast::Stmt::Let { .. })).count() >= 2
+        ));
+        assert!(ok, "for should destructure via #d temp: {:?}", f.body);
     }
 }
