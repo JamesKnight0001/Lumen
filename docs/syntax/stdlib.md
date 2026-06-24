@@ -50,6 +50,14 @@ binary.
 | `s.split(sep)` | split into a list | `"a,b".split(",")` -> `["a","b"]` |
 | `s.repeat(n)` | concatenate `s` n times | `"ab".repeat(3)` -> `"ababab"` |
 | `s.join(list)` | join a list of strings with `s` as glue | `",".join(["a","b"])` -> `"a,b"` |
+| `s.capitalize()` | first char up, rest down | `"hELLO".capitalize()` -> `"Hello"` |
+| `s.swapcase()` | invert the case of each letter | `"Hi".swapcase()` -> `"hI"` |
+| `s.count(sub)` | non-overlapping occurrences | `"banana".count("a")` -> `3` |
+| `s.rfind(sub)` | byte index of last match, or `-1` | `"hello".rfind("l")` -> `3` |
+| `s.ljust(w)` | pad with spaces to width `w` (left-align) | `"hi".ljust(5)` -> `"hi   "` |
+| `s.rjust(w)` | pad with spaces to width `w` (right-align) | `"hi".rjust(5)` -> `"   hi"` |
+| `s.center(w)` | pad both sides to width `w` | `"hi".center(6)` -> `"  hi  "` |
+| `s.zfill(w)` | pad with leading zeros to width `w` | `"42".zfill(5)` -> `"00042"` |
 
 f-strings interpolate any expression: `f"sum is {a + b}"`. For slicing and the
 `ord`/`chr` pair, see [strings](strings.md).

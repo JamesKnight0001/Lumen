@@ -1003,6 +1003,82 @@ impl Interp {
                             });
                             return Ok(Value::Str(Rc::new(t.to_string())));
                         }
+                        "capitalize" => {
+                            let mut out = String::with_capacity(s.len());
+                            for (i, c) in s.chars().enumerate() {
+                                if i == 0 {
+                                    out.push(c.to_ascii_uppercase());
+                                } else {
+                                    out.push(c.to_ascii_lowercase());
+                                }
+                            }
+                            return Ok(Value::Str(Rc::new(out)));
+                        }
+                        "swapcase" => {
+                            let out: String = s
+                                .chars()
+                                .map(|c| {
+                                    if c.is_ascii_uppercase() {
+                                        c.to_ascii_lowercase()
+                                    } else if c.is_ascii_lowercase() {
+                                        c.to_ascii_uppercase()
+                                    } else {
+                                        c
+                                    }
+                                })
+                                .collect();
+                            return Ok(Value::Str(Rc::new(out)));
+                        }
+                        "count" => {
+                            let sub = match self.eval(&args[0], env)? {
+                                Value::Str(n) => n,
+                                _ => return Err("count arg must be a string".into()),
+                            };
+                            let n = if sub.is_empty() {
+                                0
+                            } else {
+                                s.matches(&*sub).count() as i64
+                            };
+                            return Ok(Value::Int(n));
+                        }
+                        "rfind" => {
+                            let sub = match self.eval(&args[0], env)? {
+                                Value::Str(n) => n,
+                                _ => return Err("rfind arg must be a string".into()),
+                            };
+                            let idx = if sub.is_empty() {
+                                s.len() as i64
+                            } else {
+                                s.rfind(&*sub).map(|i| i as i64).unwrap_or(-1)
+                            };
+                            return Ok(Value::Int(idx));
+                        }
+                        "ljust" | "rjust" | "center" | "zfill" => {
+                            let w = match self.eval(&args[0], env)? {
+                                Value::Int(n) => n,
+                                _ => return Err("pad width must be an int".into()),
+                            };
+                            let fill = if name == "zfill" { '0' } else { ' ' };
+                            let len = s.len() as i64;
+                            if w <= len {
+                                return Ok(Value::Str(Rc::new(s.to_string())));
+                            }
+                            let pad = (w - len) as usize;
+                            let (left, right) = match name.as_str() {
+                                "ljust" => (0, pad),
+                                "center" => (pad / 2, pad - pad / 2),
+                                _ => (pad, 0), // rjust, zfill
+                            };
+                            let mut out = String::with_capacity(w as usize);
+                            for _ in 0..left {
+                                out.push(fill);
+                            }
+                            out.push_str(s);
+                            for _ in 0..right {
+                                out.push(fill);
+                            }
+                            return Ok(Value::Str(Rc::new(out)));
+                        }
                         "join" => {
 
                             if let Value::List(items) = self.eval(&args[0], env)? {

@@ -43,6 +43,14 @@ print("hello".starts_with("he"))   # true
 print("hello".ends_with("lo"))     # true
 print("a,b".replace(",", ";"))     # a;b   (replaces every occurrence)
 print("  hi  ".trim())             # "hi"  (also: lstrip / rstrip)
+print("hello".capitalize())        # Hello (first char up, rest down)
+print("Hi There".swapcase())       # hI tHERE
+print("banana".count("a"))         # 3     (non-overlapping)
+print("hello".rfind("l"))          # 3     (last index, or -1)
+print("hi".ljust(5))               # "hi   "
+print("hi".rjust(5))               # "   hi"
+print("hi".center(6))              # "  hi  "
+print("42".zfill(5))               # 00042
 ```
 
 ## Slicing

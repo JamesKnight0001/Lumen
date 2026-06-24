@@ -2510,6 +2510,86 @@ LumenVal lumen_str_title(LumenVal v) {
     return r;
 }
 
+// Uppercase the first char, lowercase the rest (Python str.capitalize).
+LumenVal lumen_str_capitalize(LumenVal v) {
+    LumenStr *s = as_str(v);
+    LumenVal r = lumen_str_new(s->data);
+    LumenStr *rs = unbox_ptr(r);
+    for (size_t i = 0; i < rs->len; i++) {
+        unsigned char b = (unsigned char)rs->data[i];
+        if (i == 0) { if (b >= 'a' && b <= 'z') rs->data[i] = (char)(b - 32); }
+        else { if (b >= 'A' && b <= 'Z') rs->data[i] = (char)(b + 32); }
+    }
+    return r;
+}
+
+// Swap the case of every ASCII letter.
+LumenVal lumen_str_swapcase(LumenVal v) {
+    LumenStr *s = as_str(v);
+    LumenVal r = lumen_str_new(s->data);
+    LumenStr *rs = unbox_ptr(r);
+    for (size_t i = 0; i < rs->len; i++) {
+        unsigned char b = (unsigned char)rs->data[i];
+        if (b >= 'a' && b <= 'z') rs->data[i] = (char)(b - 32);
+        else if (b >= 'A' && b <= 'Z') rs->data[i] = (char)(b + 32);
+    }
+    return r;
+}
+
+// Count non-overlapping occurrences of sub (Python str.count). Empty sub -> 0.
+LumenVal lumen_str_count(LumenVal v, LumenVal subv) {
+    LumenStr *s = as_str(v);
+    LumenStr *sub = as_str(subv);
+    if (sub->len == 0) return lumen_from_int(0);
+    int64_t n = 0;
+    const char *p = s->data;
+    while ((p = strstr(p, sub->data)) != NULL) { n++; p += sub->len; }
+    return lumen_from_int(n);
+}
+
+// Last index of sub, or -1 (Python str.rfind). Empty sub -> length.
+LumenVal lumen_str_rfind(LumenVal v, LumenVal subv) {
+    LumenStr *s = as_str(v);
+    LumenStr *sub = as_str(subv);
+    if (sub->len == 0) return lumen_from_int((int64_t)s->len);
+    if (sub->len > s->len) return lumen_from_int(-1);
+    for (size_t i = s->len - sub->len + 1; i-- > 0;) {
+        if (memcmp(s->data + i, sub->data, sub->len) == 0) return lumen_from_int((int64_t)i);
+    }
+    return lumen_from_int(-1);
+}
+
+// Pad with c on the given side(s) to reach width. side: 0=left(rjust), 1=right
+// (ljust), 2=center. Shared backend for ljust/rjust/center/zfill.
+static LumenVal str_pad(LumenStr *s, int64_t width, char c, int side) {
+    if (width < 0) width = 0;
+    size_t w = (size_t)width;
+    if (w <= s->len) return lumen_str_new(s->data);
+    size_t pad = w - s->len;
+    char *buf = xalloc(w + 1);
+    size_t left = side == 2 ? pad / 2 : (side == 0 ? pad : 0);
+    size_t right = pad - left;
+    memset(buf, c, left);
+    memcpy(buf + left, s->data, s->len);
+    memset(buf + left + s->len, c, right);
+    buf[w] = '\0';
+    LumenVal r = lumen_str_new(buf);
+    xfree(buf);
+    return r;
+}
+LumenVal lumen_str_ljust(LumenVal v, LumenVal wv) {
+    return str_pad(as_str(v), lumen_to_int(wv), ' ', 1);
+}
+LumenVal lumen_str_rjust(LumenVal v, LumenVal wv) {
+    return str_pad(as_str(v), lumen_to_int(wv), ' ', 0);
+}
+LumenVal lumen_str_center(LumenVal v, LumenVal wv) {
+    return str_pad(as_str(v), lumen_to_int(wv), ' ', 2);
+}
+LumenVal lumen_str_zfill(LumenVal v, LumenVal wv) {
+    return str_pad(as_str(v), lumen_to_int(wv), '0', 0);
+}
+
 LumenVal lumen_str_join(LumenVal sepv, LumenVal lst) {
     LumenStr *sep = as_str(sepv);
     LumenList *l = unbox_ptr(lst);
@@ -2542,6 +2622,11 @@ LumenVal lumen_list_index(LumenVal lst, LumenVal v) {
 }
 
 LumenVal lumen_list_count(LumenVal lst, LumenVal v) {
+    // count() is overloaded: substring count on a string, element count on a list.
+    // The compiled backends can't see the receiver type, so we dispatch here.
+    if (lumen_is_ptr(lst) && ((LumenObj *)unbox_ptr(lst))->kind == OBJ_STR) {
+        return lumen_str_count(lst, v);
+    }
     LumenList *l = unbox_ptr(lst);
     int64_t n = 0;
     for (size_t i = 0; i < l->len; i++) if (vals_eq(l->items[i], v)) n++;
