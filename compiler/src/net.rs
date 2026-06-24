@@ -56,8 +56,8 @@ mod sys {
     #[repr(C)]
     pub struct SockAddrIn {
         pub family: u16,
-        pub port: u16,   // network byte order
-        pub addr: u32,   // network byte order
+        pub port: u16, // network byte order
+        pub addr: u32, // network byte order
         pub zero: [u8; 8],
     }
 
@@ -96,15 +96,46 @@ mod sys {
         pub fn connect(s: Socket, addr: *const SockAddrIn, len: c_int) -> c_int;
         pub fn send(s: Socket, buf: *const c_char, len: c_int, flags: c_int) -> c_int;
         pub fn recv(s: Socket, buf: *mut c_char, len: c_int, flags: c_int) -> c_int;
-        pub fn sendto(s: Socket, buf: *const c_char, len: c_int, flags: c_int, to: *const SockAddrIn, tolen: c_int) -> c_int;
-        pub fn recvfrom(s: Socket, buf: *mut c_char, len: c_int, flags: c_int, from: *mut SockAddrIn, fromlen: *mut c_int) -> c_int;
+        pub fn sendto(
+            s: Socket,
+            buf: *const c_char,
+            len: c_int,
+            flags: c_int,
+            to: *const SockAddrIn,
+            tolen: c_int,
+        ) -> c_int;
+        pub fn recvfrom(
+            s: Socket,
+            buf: *mut c_char,
+            len: c_int,
+            flags: c_int,
+            from: *mut SockAddrIn,
+            fromlen: *mut c_int,
+        ) -> c_int;
         pub fn closesocket(s: Socket) -> c_int;
         pub fn shutdown(s: Socket, how: c_int) -> c_int;
-        pub fn setsockopt(s: Socket, level: c_int, opt: c_int, val: *const c_char, len: c_int) -> c_int;
+        pub fn setsockopt(
+            s: Socket,
+            level: c_int,
+            opt: c_int,
+            val: *const c_char,
+            len: c_int,
+        ) -> c_int;
         pub fn getsockname(s: Socket, addr: *mut SockAddrIn, len: *mut c_int) -> c_int;
         pub fn ioctlsocket(s: Socket, cmd: i32, arg: *mut u32) -> c_int;
-        pub fn select(nfds: c_int, rd: *mut FdSet, wr: *mut FdSet, ex: *mut FdSet, tv: *const TimeVal) -> c_int;
-        pub fn getaddrinfo(node: *const c_char, svc: *const c_char, hints: *const AddrInfo, res: *mut *mut AddrInfo) -> c_int;
+        pub fn select(
+            nfds: c_int,
+            rd: *mut FdSet,
+            wr: *mut FdSet,
+            ex: *mut FdSet,
+            tv: *const TimeVal,
+        ) -> c_int;
+        pub fn getaddrinfo(
+            node: *const c_char,
+            svc: *const c_char,
+            hints: *const AddrInfo,
+            res: *mut *mut AddrInfo,
+        ) -> c_int;
         pub fn freeaddrinfo(ai: *mut AddrInfo);
     }
 
@@ -152,7 +183,8 @@ mod sys {
             };
             let node = cstr(host);
             let mut res: *mut AddrInfo = std::ptr::null_mut();
-            if getaddrinfo(node.as_ptr(), std::ptr::null(), &hints, &mut res) != 0 || res.is_null() {
+            if getaddrinfo(node.as_ptr(), std::ptr::null(), &hints, &mut res) != 0 || res.is_null()
+            {
                 return None;
             }
             let ai = &*res;
@@ -200,7 +232,13 @@ pub fn listen(a: &[Value]) -> Result<Value, String> {
             return Ok(Value::Int(-1));
         }
         let one: i32 = 1;
-        c_setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one as *const i32 as *const _, 4);
+        c_setsockopt(
+            s,
+            SOL_SOCKET,
+            SO_REUSEADDR,
+            &one as *const i32 as *const _,
+            4,
+        );
         let Some(sa) = resolve_addr(&host, port) else {
             c_close(s);
             return Ok(Value::Int(-1));
@@ -321,7 +359,14 @@ pub fn recvfrom(a: &[Value]) -> Result<Value, String> {
     unsafe {
         let mut from: SockAddrIn = std::mem::zeroed();
         let mut flen: i32 = 16;
-        let n = c_recvfrom(s, buf.as_mut_ptr() as *mut _, max as i32, 0, &mut from, &mut flen);
+        let n = c_recvfrom(
+            s,
+            buf.as_mut_ptr() as *mut _,
+            max as i32,
+            0,
+            &mut from,
+            &mut flen,
+        );
         if n < 0 {
             return Ok(Value::Nil);
         }
@@ -483,6 +528,21 @@ macro_rules! stubs {
 }
 #[cfg(not(windows))]
 stubs!(
-    listen, accept, connect, udp, send, recv, sendto, recvfrom, close, shutdown, set_timeout,
-    set_blocking, set_opt, poll, resolve, local_port, errno
+    listen,
+    accept,
+    connect,
+    udp,
+    send,
+    recv,
+    sendto,
+    recvfrom,
+    close,
+    shutdown,
+    set_timeout,
+    set_blocking,
+    set_opt,
+    poll,
+    resolve,
+    local_port,
+    errno
 );

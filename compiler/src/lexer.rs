@@ -7,7 +7,6 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
-
     Int(i64),
     Float(f64),
     Str(String),
@@ -275,7 +274,6 @@ impl<'a> Lexer<'a> {
                 self.at_line_start = true;
                 return Ok(self.mk(Tok::Newline));
             } else {
-
                 return self.next_token();
             }
         }
@@ -283,7 +281,6 @@ impl<'a> Lexer<'a> {
         // f"..." / f'...' starts an f-string, not the identifier "f"; this
         // branch checks for the prefix before scanning a normal identifier.
         if c.is_ascii_alphabetic() || c == b'_' {
-
             if (c == b'f' || c == b'F') && (self.peek2() == b'"' || self.peek2() == b'\'') {
                 self.bump();
                 return self.lex_string(true);
@@ -602,7 +599,6 @@ impl<'a> Lexer<'a> {
                     }
                 }
             } else {
-
                 s.push(self.bump() as char);
             }
         }

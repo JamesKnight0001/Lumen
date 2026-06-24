@@ -944,7 +944,12 @@ impl LlvmGen {
             Stmt::ExprStmt(e) => self.expr_allocs(e, ctx),
             Stmt::Return(Some(e)) => self.expr_allocs(e, ctx),
             Stmt::Return(None) => false,
-            Stmt::If { cond, then, elifs, els } => {
+            Stmt::If {
+                cond,
+                then,
+                elifs,
+                els,
+            } => {
                 self.expr_allocs(cond, ctx)
                     || self.stmts_alloc(then, ctx)
                     || elifs
@@ -958,8 +963,12 @@ impl LlvmGen {
     }
     fn expr_allocs(&self, e: &Expr, ctx: &Ctx) -> bool {
         match e {
-            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Nil
-            | Expr::Ident(_) | Expr::SelfExpr => false,
+            Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Bool(_)
+            | Expr::Nil
+            | Expr::Ident(_)
+            | Expr::SelfExpr => false,
             Expr::Unary { expr, .. } => self.expr_allocs(expr, ctx),
             Expr::Binary { lhs, rhs, .. } => {
                 // proven-numeric binops compute unboxed (no alloc); otherwise the
@@ -968,7 +977,9 @@ impl LlvmGen {
                     || (self.known_float(lhs, ctx) && self.known_float(rhs, ctx));
                 !numeric || self.expr_allocs(lhs, ctx) || self.expr_allocs(rhs, ctx)
             }
-            Expr::Index { obj, index } => self.expr_allocs(obj, ctx) || self.expr_allocs(index, ctx),
+            Expr::Index { obj, index } => {
+                self.expr_allocs(obj, ctx) || self.expr_allocs(index, ctx)
+            }
             Expr::Field { obj, .. } => self.expr_allocs(obj, ctx),
             // literals that build heap objects, calls, comprehensions, closures
             _ => true,
@@ -1117,7 +1128,11 @@ impl LlvmGen {
                 // may themselves allocate) stay on the heap.
                 let arena = ctx.arena_now;
                 ctx.arena_now = false;
-                let ctor = if arena { "lumen_list_new_arena" } else { "lumen_list_new" };
+                let ctor = if arena {
+                    "lumen_list_new_arena"
+                } else {
+                    "lumen_list_new"
+                };
                 self.need(ctor, &format!("i64 @{ctor}(i64)"));
                 self.need("lumen_list_push", "void @lumen_list_push(i64, i64)");
                 let lst = self.vreg();
@@ -1138,7 +1153,11 @@ impl LlvmGen {
             Expr::Map(kvs) => {
                 let arena = ctx.arena_now;
                 ctx.arena_now = false;
-                let ctor = if arena { "lumen_map_new_arena" } else { "lumen_map_new" };
+                let ctor = if arena {
+                    "lumen_map_new_arena"
+                } else {
+                    "lumen_map_new"
+                };
                 self.need(ctor, &format!("i64 @{ctor}()"));
                 self.need("lumen_map_set", "void @lumen_map_set(i64, i64, i64)");
                 let m = self.vreg();
@@ -1365,7 +1384,8 @@ impl LlvmGen {
         }
         // unboxed float fast path: both sides proven float -> inline f64 math
         // (no fast-math flags, so IEEE-identical to the runtime). Box = bitcast.
-        if !ctx.has_try && !unbox_off() && self.known_float(lhs, ctx) && self.known_float(rhs, ctx) {
+        if !ctx.has_try && !unbox_off() && self.known_float(lhs, ctx) && self.known_float(rhs, ctx)
+        {
             if let Some(res) = self.float_binop(op, lhs, rhs, ctx, out)? {
                 return Ok(res);
             }
@@ -1387,7 +1407,10 @@ impl LlvmGen {
         match e {
             Expr::Int(_) => true,
             Expr::Ident(n) => self.info.is_ivar(&ctx.func, n),
-            Expr::Unary { op: UnOp::Neg, expr } => self.known_int(expr, ctx),
+            Expr::Unary {
+                op: UnOp::Neg,
+                expr,
+            } => self.known_int(expr, ctx),
             Expr::Binary { op, lhs, rhs } => {
                 // Div/Mod only when the divisor is a nonzero int literal: then
                 // the runtime's zero-check is moot and C-truncating srem/sdiv
@@ -1415,7 +1438,10 @@ impl LlvmGen {
                 let _ = writeln!(out, "  {r} = load i64, ptr {slot}");
                 Ok(r)
             }
-            Expr::Unary { op: UnOp::Neg, expr } => {
+            Expr::Unary {
+                op: UnOp::Neg,
+                expr,
+            } => {
                 let a = self.eval_int(expr, ctx, out)?;
                 let r = self.vreg();
                 let _ = writeln!(out, "  {r} = sub i64 0, {a}");
@@ -1498,11 +1524,15 @@ impl LlvmGen {
         // already proved the divisor is a nonzero literal (eval_int emits sdiv/srem).
         let divmod_ok = matches!(op, BinOp::Div | BinOp::Mod) && nonzero_lit(rhs);
         if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) || divmod_ok {
-            let raw = self.eval_int(&Expr::Binary {
-                op,
-                lhs: Box::new(lhs.clone()),
-                rhs: Box::new(rhs.clone()),
-            }, ctx, out)?;
+            let raw = self.eval_int(
+                &Expr::Binary {
+                    op,
+                    lhs: Box::new(lhs.clone()),
+                    rhs: Box::new(rhs.clone()),
+                },
+                ctx,
+                out,
+            )?;
             return Ok(Some(self.box_int(&raw, out)));
         }
         // compares -> icmp on raw, box as bool
@@ -1533,12 +1563,13 @@ impl LlvmGen {
         match e {
             Expr::Float(_) => true,
             Expr::Ident(n) => self.info.is_fvar(&ctx.func, n),
-            Expr::Unary { op: UnOp::Neg, expr } => self.known_float(expr, ctx),
+            Expr::Unary {
+                op: UnOp::Neg,
+                expr,
+            } => self.known_float(expr, ctx),
             Expr::Binary { op, lhs, rhs } => {
-                matches!(
-                    op,
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div
-                ) && self.known_float(lhs, ctx)
+                matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div)
+                    && self.known_float(lhs, ctx)
                     && self.known_float(rhs, ctx)
             }
             Expr::Call { callee, .. } => {
@@ -1553,7 +1584,10 @@ impl LlvmGen {
     fn eval_float(&mut self, e: &Expr, ctx: &mut Ctx, out: &mut String) -> Result<String, String> {
         match e {
             Expr::Float(f) => Ok(fmt_double(*f)),
-            Expr::Unary { op: UnOp::Neg, expr } => {
+            Expr::Unary {
+                op: UnOp::Neg,
+                expr,
+            } => {
                 let a = self.eval_float(expr, ctx, out)?;
                 let r = self.vreg();
                 let _ = writeln!(out, "  {r} = fneg double {a}");
@@ -1606,11 +1640,15 @@ impl LlvmGen {
         out: &mut String,
     ) -> Result<Option<String>, String> {
         if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
-            let raw = self.eval_float(&Expr::Binary {
-                op,
-                lhs: Box::new(lhs.clone()),
-                rhs: Box::new(rhs.clone()),
-            }, ctx, out)?;
+            let raw = self.eval_float(
+                &Expr::Binary {
+                    op,
+                    lhs: Box::new(lhs.clone()),
+                    rhs: Box::new(rhs.clone()),
+                },
+                ctx,
+                out,
+            )?;
             return Ok(Some(self.box_float(&raw, out)));
         }
         let cc = match op {

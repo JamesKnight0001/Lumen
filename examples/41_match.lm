@@ -1,0 +1,60 @@
+fn classify(n):
+    match n:
+        case 0:
+            return "zero"
+        case 1, 2, 3:
+            return "small"
+        case _ if n < 0:
+            return "negative"
+        case _:
+            return "big"
+
+fn name(c):
+    match c:
+        case "a":
+            return "alpha"
+        case "b":
+            return "beta"
+        case other:
+            return f"unknown:{other}"
+
+fn main():
+    print(classify(0))
+    print(classify(2))
+    print(classify(3))
+    print(classify(-5))
+    print(classify(100))
+    print(name("a"))
+    print(name("b"))
+    print(name("z"))
+
+    # match on an expression (non-trivial subject -> temp binding)
+    let xs = [10, 20, 30]
+    match xs.len():
+        case 3:
+            print("three")
+        case _:
+            print("other")
+
+    # guard referencing in-scope var
+    let v = 42
+    match v:
+        case _ if v > 40:
+            print("over forty")
+        case _:
+            print("nope")
+
+    # binding pattern captures the value
+    match 7 + 1:
+        case n:
+            print(n)
+
+    # nested match
+    for i in [0, 1, 5]:
+        match i:
+            case 0:
+                print("z")
+            case 1:
+                print("o")
+            case _:
+                print("m")

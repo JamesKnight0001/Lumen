@@ -75,7 +75,6 @@ fn desugar_stmt(s: &mut Stmt, n: &mut usize) {
 }
 
 fn desugar_expr(e: &mut Expr, n: &mut usize) {
-
     match e {
         Expr::Unary { expr, .. } => desugar_expr(expr, n),
         Expr::Binary { lhs, rhs, .. } => {
@@ -169,7 +168,6 @@ fn desugar_expr(e: &mut Expr, n: &mut usize) {
                 args: vec![Expr::Ident(var.clone())],
             };
             *e = if is_map {
-
                 Expr::ListComp {
                     elem: Box::new(call_f),
                     var,
@@ -177,7 +175,6 @@ fn desugar_expr(e: &mut Expr, n: &mut usize) {
                     cond: None,
                 }
             } else {
-
                 Expr::ListComp {
                     elem: Box::new(Expr::Ident(var.clone())),
                     var,

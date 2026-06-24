@@ -51,6 +51,48 @@ for key in {"a": 1, "b": 2}:
 `range(n)` is the same as `0..n`, and `range(lo, hi)` the same as `lo..hi`. Both
 forms also produce a real list you can store and reuse.
 
+## `match` / `case`
+
+A cleaner way to branch on a value than a long `if`/`elif` ladder. Each `case`
+is tried top to bottom; the first that matches runs, and the rest are skipped.
+
+```lumen
+match status:
+    case 200:
+        print("ok")
+    case 301, 302, 307:        # or-pattern: any of these
+        print("redirect")
+    case code if code >= 500:  # guard: a bool condition
+        print("server error")
+    case _:                    # wildcard: the default
+        print("other")
+```
+
+Patterns:
+
+- **literal** (`case 200:`) matches when the value equals it.
+- **or-pattern** (`case 1, 2, 3:`) matches any of the listed values.
+- **binding** (`case code:`) always matches and binds the value to that name.
+- **wildcard** (`case _:`) always matches and binds nothing.
+- **guard** (`case _ if x > 0:`) adds a bool condition that must also hold.
+
+A binding or `_` is irrefutable, so it must be the last case. To inspect the
+matched value in a guard, match on a variable and reference it:
+
+```lumen
+let x = compute()
+match x:
+    case 0:
+        print("zero")
+    case _ if x % 2 == 0:
+        print("even")
+    case _:
+        print("odd")
+```
+
+`match` is sugar: it lowers to an `if`/`elif`/`else` chain, so it runs
+identically under the interpreter and both compiled backends.
+
 ## `break` and `continue`
 
 Both work in `while` and `for`. `break` leaves the loop; `continue` skips to the

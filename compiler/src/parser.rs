@@ -14,6 +14,10 @@ pub struct Parser {
     // Name of the decl currently being parsed (struct/impl target or fn), so
     // fields/params/methods can record their parent. Spanned mode only.
     cur_parent: Option<String>,
+    // match-lowering: the SUBJ `let` bindings to emit before a lowered `match`,
+    // and a counter for the fresh temp names. See plan/match-design.md.
+    mprelude: Vec<Stmt>,
+    mtemp: usize,
 }
 
 type PResult<T> = Result<T, String>;
@@ -25,6 +29,8 @@ impl Parser {
             pos: 0,
             decls: None,
             cur_parent: None,
+            mprelude: Vec::new(),
+            mtemp: 0,
         }
     }
 
@@ -35,6 +41,8 @@ impl Parser {
             pos: 0,
             decls: Some(Vec::new()),
             cur_parent: None,
+            mprelude: Vec::new(),
+            mtemp: 0,
         }
     }
 
@@ -131,6 +139,11 @@ impl Parser {
 
             if let Item::Stmt(_) = &item {
                 items.push(Item::Stmt(Stmt::SrcLine(line)));
+            }
+            // A top-level `match` may have left a SUBJ `let` in the prelude;
+            // emit it as an item before the lowered statement.
+            for p in self.mprelude.drain(..) {
+                items.push(Item::Stmt(p));
             }
             items.push(item);
             self.skip_newlines();
@@ -467,7 +480,9 @@ impl Parser {
                 break;
             }
             stmts.push(Stmt::SrcLine(self.line() as u32));
-            stmts.push(self.parse_stmt()?);
+            let s = self.parse_stmt()?;
+            stmts.append(&mut self.mprelude);
+            stmts.push(s);
             self.skip_newlines();
         }
         self.expect(&Tok::Dedent)?;
@@ -483,7 +498,10 @@ impl Parser {
         let line = self.line() as u32;
         let stmt = self.parse_stmt()?;
         self.skip_newlines();
-        Ok(vec![Stmt::SrcLine(line), stmt])
+        let mut out = vec![Stmt::SrcLine(line)];
+        out.append(&mut self.mprelude);
+        out.push(stmt);
+        Ok(out)
     }
 
     fn parse_stmt(&mut self) -> PResult<Stmt> {
@@ -492,6 +510,7 @@ impl Parser {
         // fall through to a shared end-of-line check that rejects trailing junk.
         let stmt = match self.peek() {
             Tok::If => return self.parse_if(),
+            Tok::Match => return self.parse_match(),
             Tok::While => {
                 self.advance();
                 let cond = self.parse_expr()?;
@@ -627,6 +646,158 @@ impl Parser {
         })
     }
 
+    // match SUBJ: / case PAT [, PAT...] [if GUARD]: BODY / case _ : BODY
+    // Lowered entirely to a Stmt::If chain here, so no backend sees `match`
+    // (3-way byte-identical is automatic). See plan/match-design.md.
+    fn parse_match(&mut self) -> PResult<Stmt> {
+        self.expect(&Tok::Match)?;
+        let subj = self.parse_expr()?;
+        self.expect(&Tok::Colon)?;
+        self.expect(&Tok::Newline)?;
+        self.expect(&Tok::Indent)?;
+
+        // Bind SUBJ to a fresh temp unless it is already trivial to re-read.
+        // The binding is held locally and pushed to mprelude only at the very
+        // end: case bodies call parse_body, which drains mprelude, so pushing
+        // early would let the first case steal our SUBJ `let`.
+        let trivial = matches!(
+            subj,
+            Expr::Ident(_)
+                | Expr::Int(_)
+                | Expr::Str(_)
+                | Expr::Bool(_)
+                | Expr::Nil
+                | Expr::SelfExpr
+        );
+        let mut subj_let: Option<Stmt> = None;
+        let subref: Expr = if trivial {
+            subj.clone()
+        } else {
+            let t = format!("#m{}", self.mtemp);
+            self.mtemp += 1;
+            subj_let = Some(Stmt::Let {
+                name: t.clone(),
+                mutable: false,
+                ty: Type::Unknown,
+                value: subj,
+            });
+            Expr::Ident(t)
+        };
+
+        // Collect arms as (Option<cond>, body). cond=None marks the default
+        // (`_` or a binding pattern), which can appear only as the last arm.
+        let mut arms: Vec<(Option<Expr>, Vec<Stmt>)> = Vec::new();
+        let mut seen_default = false;
+        loop {
+            self.skip_newlines();
+            if self.check(&Tok::Dedent) || self.check(&Tok::Eof) {
+                break;
+            }
+            self.expect(&Tok::Case)?;
+            if seen_default {
+                return Err("a case after `_`/binding is unreachable".into());
+            }
+
+            // First pattern: a binding/wildcard ident, or a value to compare.
+            let mut bind: Option<String> = None;
+            let mut alts: Vec<Expr> = Vec::new();
+            if let Tok::Ident(name) = self.peek().clone() {
+                // bare ident, NOT followed by a member/call/index, is a binding
+                let next = &self.toks[self.pos + 1].tok;
+                if matches!(next, Tok::Colon | Tok::If | Tok::Comma) {
+                    bind = Some(name);
+                    self.advance();
+                } else {
+                    alts.push(self.parse_bp(0)?);
+                }
+            } else {
+                alts.push(self.parse_bp(0)?);
+            }
+            // or-pattern: more comma-separated values (only for value patterns)
+            while bind.is_none() && self.eat(&Tok::Comma) {
+                alts.push(self.parse_bp(0)?);
+            }
+            // optional guard
+            let guard = if self.eat(&Tok::If) {
+                Some(self.parse_bp(0)?)
+            } else {
+                None
+            };
+            self.expect(&Tok::Colon)?;
+            let mut body = self.parse_body()?;
+
+            // Build this arm's condition.
+            let is_wild = bind.as_deref() == Some("_");
+            if let Some(name) = &bind {
+                // binding/wildcard: irrefutable default. A non-`_` name binds SUBJ.
+                if !is_wild {
+                    body.insert(
+                        0,
+                        Stmt::Let {
+                            name: name.clone(),
+                            mutable: false,
+                            ty: Type::Unknown,
+                            value: subref.clone(),
+                        },
+                    );
+                }
+                match guard {
+                    // guarded default stays refutable (cond = guard)
+                    Some(g) => arms.push((Some(g), body)),
+                    None => {
+                        seen_default = true;
+                        arms.push((None, body));
+                    }
+                }
+            } else {
+                // value pattern(s): SUBJ == a [or SUBJ == b ...]
+                let mut cond = eq_chain(&subref, &alts);
+                if let Some(g) = guard {
+                    cond = Expr::Binary {
+                        op: BinOp::And,
+                        lhs: Box::new(cond),
+                        rhs: Box::new(g),
+                    };
+                }
+                arms.push((Some(cond), body));
+            }
+        }
+        self.expect(&Tok::Dedent)?;
+
+        // Fold arms into an If chain. Leading guarded/value arms -> cond/elifs,
+        // a trailing default (cond=None) -> els.
+        let mut els: Option<Vec<Stmt>> = None;
+        if matches!(arms.last(), Some((None, _))) {
+            els = Some(arms.pop().unwrap().1);
+        }
+        let stmt = if arms.is_empty() {
+            // only a default (or nothing): run it unconditionally (or no-op)
+            Stmt::If {
+                cond: Expr::Bool(true),
+                then: els.unwrap_or_default(),
+                elifs: Vec::new(),
+                els: None,
+            }
+        } else {
+            let (c0, b0) = arms.remove(0);
+            let elifs: Vec<(Expr, Vec<Stmt>)> =
+                arms.into_iter().map(|(c, b)| (c.unwrap(), b)).collect();
+            Stmt::If {
+                cond: c0.unwrap(),
+                then: b0,
+                elifs,
+                els,
+            }
+        };
+        // Now that all case bodies are parsed (and have drained their own
+        // preludes), publish the SUBJ binding so the enclosing block emits it
+        // right before this lowered `if`.
+        if let Some(sl) = subj_let {
+            self.mprelude.push(sl);
+        }
+        Ok(stmt)
+    }
+
     fn parse_expr(&mut self) -> PResult<Expr> {
         let value = self.parse_bp(0)?;
 
@@ -749,7 +920,6 @@ impl Parser {
         loop {
             match self.peek() {
                 Tok::LParen => {
-
                     self.advance();
                     if self.is_nargs() {
                         let args = self.parse_nargs()?;
@@ -849,7 +1019,6 @@ impl Parser {
     // Distinguish `f(x: 1)` (named/struct-literal args) from a positional call by
     // peeking for `Ident :` right after the open paren.
     fn is_nargs(&self) -> bool {
-
         matches!(&self.toks[self.pos].tok, Tok::Ident(_))
             && matches!(&self.toks[self.pos + 1].tok, Tok::Colon)
     }
@@ -883,7 +1052,6 @@ impl Parser {
             Tok::SelfKw => Ok(Expr::SelfExpr),
             Tok::Ident(s) => Ok(Expr::Ident(s)),
             Tok::Fn => {
-
                 self.expect(&Tok::LParen)?;
                 let mut params = Vec::new();
                 if !self.check(&Tok::RParen) {
@@ -897,10 +1065,8 @@ impl Parser {
                 self.expect(&Tok::RParen)?;
                 self.expect(&Tok::Colon)?;
                 let body = if self.check(&Tok::Newline) {
-
                     self.parse_block()?
                 } else {
-
                     let ex = self.parse_expr()?;
                     vec![Stmt::Return(Some(ex))]
                 };
@@ -954,7 +1120,6 @@ impl Parser {
                 Ok(Expr::List(elems))
             }
             Tok::LBrace => {
-
                 let mut entries = Vec::new();
                 if !self.check(&Tok::RBrace) {
                     loop {
@@ -995,6 +1160,25 @@ impl Parser {
         let s = self.ident()?;
         Ok((s, idx))
     }
+}
+
+// Build `subj == a` or `(subj == a) or (subj == b) or ...` for or-patterns.
+fn eq_chain(subj: &Expr, alts: &[Expr]) -> Expr {
+    let mk = |a: &Expr| Expr::Binary {
+        op: BinOp::Eq,
+        lhs: Box::new(subj.clone()),
+        rhs: Box::new(a.clone()),
+    };
+    let mut it = alts.iter();
+    let mut cond = mk(it.next().expect("at least one pattern"));
+    for a in it {
+        cond = Expr::Binary {
+            op: BinOp::Or,
+            lhs: Box::new(cond),
+            rhs: Box::new(mk(a)),
+        };
+    }
+    cond
 }
 
 fn parse_fstring(s: &str) -> Vec<FStrPart> {
@@ -1055,7 +1239,6 @@ fn parse_fstring(s: &str) -> Vec<FStrPart> {
 }
 
 impl Parser {
-
     fn parse_top(&mut self) -> PResult<Expr> {
         self.skip_newlines();
         self.parse_expr()
@@ -1082,14 +1265,12 @@ mod tests {
             assert_eq!(slice, d.name, "span mismatch for {:?}", d);
         }
         // Spot-check kinds/parents are wired up.
-        assert!(decls
-            .iter()
-            .any(|d| d.kind == DeclKind::Method && d.name == "dist"
-                && d.parent.as_deref() == Some("Point")));
-        assert!(decls
-            .iter()
-            .any(|d| d.kind == DeclKind::Param && d.name == "other"
-                && d.parent.as_deref() == Some("dist")));
+        assert!(decls.iter().any(|d| d.kind == DeclKind::Method
+            && d.name == "dist"
+            && d.parent.as_deref() == Some("Point")));
+        assert!(decls.iter().any(|d| d.kind == DeclKind::Param
+            && d.name == "other"
+            && d.parent.as_deref() == Some("dist")));
         assert!(decls
             .iter()
             .any(|d| d.kind == DeclKind::Import && d.name == "sqrt"));
@@ -1159,10 +1340,13 @@ mod tests {
         ];
         for (src, lvl, module) in cases {
             let prog = crate::parse_program(src).unwrap();
-            let imp = prog.iter().find_map(|it| match it {
-                crate::ast::Item::Import(i) => Some(i),
-                _ => None,
-            }).expect("an import");
+            let imp = prog
+                .iter()
+                .find_map(|it| match it {
+                    crate::ast::Item::Import(i) => Some(i),
+                    _ => None,
+                })
+                .expect("an import");
             assert_eq!(imp.level, lvl, "level for {src:?}");
             assert_eq!(imp.module, module, "module for {src:?}");
         }
@@ -1172,12 +1356,61 @@ mod tests {
     #[test]
     fn param_defaults() {
         let prog = crate::parse_program("fn f(a, b=10, c=\"x\"):\n    return a\n").unwrap();
-        let f = prog.iter().find_map(|it| match it {
-            crate::ast::Item::Fn(f) => Some(f),
-            _ => None,
-        }).expect("a fn");
+        let f = prog
+            .iter()
+            .find_map(|it| match it {
+                crate::ast::Item::Fn(f) => Some(f),
+                _ => None,
+            })
+            .expect("a fn");
         assert!(f.params[0].default.is_none(), "a has no default");
         assert!(f.params[1].default.is_some(), "b has a default");
         assert!(f.params[2].default.is_some(), "c has a default");
+    }
+
+    // `match` lowers to a Stmt::If: first case is the cond/then, the rest elifs,
+    // a trailing `_` is the else.
+    #[test]
+    fn match_lowers_to_if() {
+        let prog = crate::parse_program(
+            "fn f(n):\n    match n:\n        case 1:\n            return 10\n        case 2, 3:\n            return 20\n        case _:\n            return 0\n",
+        )
+        .unwrap();
+        let f = prog
+            .iter()
+            .find_map(|it| match it {
+                crate::ast::Item::Fn(f) => Some(f),
+                _ => None,
+            })
+            .expect("a fn");
+        let has_if = f
+            .body
+            .iter()
+            .any(|s| matches!(s, crate::ast::Stmt::If { elifs, els, .. } if elifs.len() == 1 && els.is_some()));
+        assert!(
+            has_if,
+            "match should lower to an if/elif/else: {:?}",
+            f.body
+        );
+    }
+
+    // A non-trivial subject is bound to a `#m` temp before the lowered if.
+    #[test]
+    fn match_binds_subject_temp() {
+        let prog =
+            crate::parse_program("fn f(xs):\n    match xs.len():\n        case 0:\n            return 1\n        case _:\n            return 2\n")
+                .unwrap();
+        let f = prog
+            .iter()
+            .find_map(|it| match it {
+                crate::ast::Item::Fn(f) => Some(f),
+                _ => None,
+            })
+            .expect("a fn");
+        let binds = f
+            .body
+            .iter()
+            .any(|s| matches!(s, crate::ast::Stmt::Let { name, .. } if name.starts_with("#m")));
+        assert!(binds, "subject should be bound to a #m temp: {:?}", f.body);
     }
 }

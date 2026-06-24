@@ -25,15 +25,33 @@ pub type ArenaSet = HashSet<(String, String)>;
 fn safe_method(name: &str) -> bool {
     matches!(
         name,
-        "push" | "pop" | "get" | "set" | "keys" | "values" | "items" | "has"
-            | "remove" | "clear" | "len" | "contains" | "insert" | "sort"
-            | "reverse" | "index" | "find" | "count"
+        "push"
+            | "pop"
+            | "get"
+            | "set"
+            | "keys"
+            | "values"
+            | "items"
+            | "has"
+            | "remove"
+            | "clear"
+            | "len"
+            | "contains"
+            | "insert"
+            | "sort"
+            | "reverse"
+            | "index"
+            | "find"
+            | "count"
     )
 }
 
 /// Free builtins that take the value but don't store it.
 fn safe_builtin(name: &str) -> bool {
-    matches!(name, "len" | "print" | "println" | "str" | "type" | "drop" | "repr")
+    matches!(
+        name,
+        "len" | "print" | "println" | "str" | "type" | "drop" | "repr"
+    )
 }
 
 pub fn analyze(prog: &Program) -> ArenaSet {
@@ -95,7 +113,9 @@ fn collect_candidates(body: &[Stmt], structs: &HashSet<String>, out: &mut Vec<St
                     out.push(name.clone());
                 }
             }
-            Stmt::If { then, elifs, els, .. } => {
+            Stmt::If {
+                then, elifs, els, ..
+            } => {
                 collect_candidates(then, structs, out);
                 for (_, b) in elifs {
                     collect_candidates(b, structs, out);
@@ -107,7 +127,9 @@ fn collect_candidates(body: &[Stmt], structs: &HashSet<String>, out: &mut Vec<St
             Stmt::While { body, .. } | Stmt::For { body, .. } => {
                 collect_candidates(body, structs, out)
             }
-            Stmt::Try { body, catch_body, .. } => {
+            Stmt::Try {
+                body, catch_body, ..
+            } => {
                 collect_candidates(body, structs, out);
                 collect_candidates(catch_body, structs, out);
             }
@@ -170,7 +192,12 @@ impl Escapes<'_> {
                 self.walk_expr(e);
             }
             Stmt::Return(None) => {}
-            Stmt::If { cond, then, elifs, els } => {
+            Stmt::If {
+                cond,
+                then,
+                elifs,
+                els,
+            } => {
                 self.walk_expr(cond);
                 self.walk_block(then);
                 for (c, b) in elifs {
@@ -192,7 +219,9 @@ impl Escapes<'_> {
                 }
                 self.walk_block(body);
             }
-            Stmt::Try { body, catch_body, .. } => {
+            Stmt::Try {
+                body, catch_body, ..
+            } => {
                 self.walk_block(body);
                 self.walk_block(catch_body);
             }
@@ -273,8 +302,13 @@ impl Escapes<'_> {
         match e {
             // A plain Ident read (arithmetic/condition) is safe; escapes are
             // flagged at the specific escaping sites below.
-            Expr::Ident(_) | Expr::Int(_) | Expr::Float(_) | Expr::Str(_)
-            | Expr::Bool(_) | Expr::Nil | Expr::SelfExpr => {}
+            Expr::Ident(_)
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Str(_)
+            | Expr::Bool(_)
+            | Expr::Nil
+            | Expr::SelfExpr => {}
 
             Expr::Unary { expr, .. } => self.walk_expr(expr),
             Expr::Binary { lhs, rhs, .. } => {
@@ -369,7 +403,9 @@ impl Escapes<'_> {
                 }
                 self.walk_expr(cond);
             }
-            Expr::ListComp { elem, iter, cond, .. } => {
+            Expr::ListComp {
+                elem, iter, cond, ..
+            } => {
                 if self.mentions(elem) {
                     self.escaped = true;
                 }

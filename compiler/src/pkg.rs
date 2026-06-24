@@ -47,8 +47,7 @@ fn resolve(src: &str) -> (String, String) {
 // `lumen install [pkg-or-url ...]`. No args = install everything in lumen.pkg.
 pub fn install(args: &[String]) -> Result<(), String> {
     let root = modules_dir();
-    std::fs::create_dir_all(&root)
-        .map_err(|e| format!("cannot create {}: {e}", root.display()))?;
+    std::fs::create_dir_all(&root).map_err(|e| format!("cannot create {}: {e}", root.display()))?;
 
     let specs: Vec<(String, String)> = if args.is_empty() {
         let deps = read_manifest();
@@ -159,7 +158,9 @@ fn add_dep(name: &str, source: &str) {
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
     let mut replaced = false;
     for l in lines.iter_mut() {
-        if l.trim_start().starts_with(&format!("{name} ")) || l.trim_start().starts_with(&format!("{name}=")) {
+        if l.trim_start().starts_with(&format!("{name} "))
+            || l.trim_start().starts_with(&format!("{name}="))
+        {
             *l = line.clone();
             replaced = true;
             break;

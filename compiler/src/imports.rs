@@ -114,7 +114,15 @@ pub fn collect(
 
         let sub_dir = path.parent().unwrap_or(base_dir).to_path_buf();
         let mut sub_aliases = HashMap::new();
-        collect(&sub, &sub_dir, root, visited, out, &mut sub_aliases, is_builtin)?;
+        collect(
+            &sub,
+            &sub_dir,
+            root,
+            visited,
+            out,
+            &mut sub_aliases,
+            is_builtin,
+        )?;
         let start = out.len();
         for it in &sub {
             match it {
@@ -208,7 +216,6 @@ fn rewrite_expr(
     is_builtin: &dyn Fn(&str) -> bool,
     e: &mut Expr,
 ) {
-
     // `alias.foo(args)` parses as a method call, but if `alias` is an imported
     // module (not a builtin) it's really a qualified function call. Rewrite it to
     // a plain Call to `foo`, since imports share one flat namespace.

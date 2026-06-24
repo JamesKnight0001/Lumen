@@ -177,7 +177,9 @@ fn backend_choice(args: &[String]) -> Option<String> {
             }
         }
     }
-    std::env::var("LUMEN_BACKEND").ok().map(|v| v.to_lowercase())
+    std::env::var("LUMEN_BACKEND")
+        .ok()
+        .map(|v| v.to_lowercase())
 }
 
 fn build(prog: &ast::Program, file: &str, src: &str, args: &[String]) {

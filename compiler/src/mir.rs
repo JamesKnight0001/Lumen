@@ -42,10 +42,7 @@ fn stmt_ok(s: &Stmt) -> bool {
                 && elifs
                     .iter()
                     .all(|(c, b)| expr_ok(c) && b.iter().all(stmt_ok))
-                && els
-                    .as_ref()
-                    .map(|b| b.iter().all(stmt_ok))
-                    .unwrap_or(true)
+                && els.as_ref().map(|b| b.iter().all(stmt_ok)).unwrap_or(true)
         }
         Stmt::While { cond, body } => expr_ok(cond) && body.iter().all(stmt_ok),
 
@@ -68,9 +65,7 @@ fn expr_ok(e: &Expr) -> bool {
             matches!(&**callee, Expr::Ident(_)) && args.iter().all(expr_ok)
         }
         Expr::Range { lo, hi } => expr_ok(lo) && expr_ok(hi),
-        Expr::IfElse { cond, then, els } => {
-            expr_ok(cond) && expr_ok(then) && expr_ok(els)
-        }
+        Expr::IfElse { cond, then, els } => expr_ok(cond) && expr_ok(then) && expr_ok(els),
 
         _ => false,
     }
@@ -82,7 +77,6 @@ pub type BlockId = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Val {
-
     IntConst(i64),
 
     FloatConst(u64),
@@ -93,7 +87,6 @@ pub enum Val {
 }
 
 impl Val {
-
     pub fn float(x: f64) -> Val {
         Val::FloatConst(x.to_bits())
     }
@@ -101,7 +94,6 @@ impl Val {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinKind {
-
     IAdd,
     ISub,
     IMul,
@@ -132,7 +124,6 @@ pub enum BinKind {
 }
 
 impl BinKind {
-
     pub fn is_cmp(self) -> bool {
         use BinKind::*;
         matches!(
@@ -158,7 +149,6 @@ pub enum UnKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Inst {
-
     Bin {
         dst: Vreg,
         op: BinKind,
@@ -174,7 +164,10 @@ pub enum Inst {
         wrap: bool,
     },
 
-    Move { dst: Vreg, src: Val },
+    Move {
+        dst: Vreg,
+        src: Val,
+    },
 
     Call {
         dst: Vreg,
@@ -185,7 +178,11 @@ pub enum Inst {
 
     Ret(Option<Val>),
 
-    Br { cond: Val, t: BlockId, f: BlockId },
+    Br {
+        cond: Val,
+        t: BlockId,
+        f: BlockId,
+    },
 
     Jmp(BlockId),
 
@@ -196,7 +193,6 @@ pub enum Inst {
 }
 
 impl Inst {
-
     pub fn def(&self) -> Option<Vreg> {
         match self {
             Inst::Bin { dst, .. }
@@ -376,7 +372,6 @@ pub struct SigMap {
 }
 
 impl SigMap {
-
     pub fn from_program(prog: &crate::ast::Program) -> SigMap {
         let mut m = SigMap::default();
         for it in prog {
@@ -442,11 +437,7 @@ impl<'a> Lowerer<'a> {
         lw.sealed.insert(entry);
 
         for (i, p) in params.iter().enumerate() {
-            let dom = if param_float[i] {
-                Dom::Float
-            } else {
-                Dom::Int
-            };
+            let dom = if param_float[i] { Dom::Float } else { Dom::Int };
             lw.var_dom.insert(p.name.clone(), dom);
             lw.write_var(&p.name, entry, Val::Param(i as u32));
         }
@@ -486,7 +477,6 @@ impl<'a> Lowerer<'a> {
         } else {
             let preds = self.preds.get(&block).cloned().unwrap_or_default();
             if preds.len() == 1 {
-
                 self.read_var(name, preds[0])
             } else if preds.is_empty() {
                 // Unreachable read (entry has no preds): pick a typed zero so
@@ -497,7 +487,6 @@ impl<'a> Lowerer<'a> {
                     Dom::Float => Val::float(0.0),
                 }
             } else {
-
                 let phi = self.fresh_phi(block);
                 self.write_var(name, block, Val::Vreg(phi));
                 self.add_phis(name, block, phi);
@@ -768,10 +757,7 @@ impl<'a> Lowerer<'a> {
                         });
                         Val::Vreg(dst)
                     }
-                    UnOp::Not => {
-
-                        self.emit_bin(BinKind::IEq, a, Val::IntConst(0), false)
-                    }
+                    UnOp::Not => self.emit_bin(BinKind::IEq, a, Val::IntConst(0), false),
                 }
             }
             Expr::Binary { op, lhs, rhs } => self.lower_binary(*op, lhs, rhs),
@@ -792,7 +778,6 @@ impl<'a> Lowerer<'a> {
                 Val::Vreg(dst)
             }
             Expr::IfElse { cond, then, els } => {
-
                 let dom = self.expr_dom(e);
                 let then_b = self.f.new_block();
                 let else_b = self.f.new_block();
@@ -835,7 +820,6 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Val {
-
         if matches!(op, BinOp::And | BinOp::Or) {
             return self.lower_shortcct(op, lhs, rhs);
         }
@@ -935,7 +919,6 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_cond(&mut self, e: &Expr) -> Val {
-
         match e {
             Expr::Binary {
                 op:
@@ -989,7 +972,6 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 _ => {
-
                     if let Stmt::SrcLine(n) = s {
                         self.cur_line = *n;
                     }
@@ -1040,7 +1022,6 @@ impl<'a> Lowerer<'a> {
         elifs: &[(Expr, Vec<Stmt>)],
         els: &Option<Vec<Stmt>>,
     ) {
-
         let then_b = self.f.new_block();
         let else_b = self.f.new_block();
         let join_b = self.f.new_block();
@@ -1076,7 +1057,6 @@ impl<'a> Lowerer<'a> {
                 self.terminate(Inst::Jmp(join_b));
             }
         } else {
-
             let (c0, b0) = &elifs[0];
             let rest = &elifs[1..];
             self.lower_if(c0, b0, rest, els);
@@ -1189,7 +1169,6 @@ impl<'a> Lowerer<'a> {
     }
 
     fn finish(mut self) -> MirFn {
-
         if let Some(b) = self.cur.take() {
             let v = if self.f.ret_float {
                 Val::float(0.0)
@@ -1224,7 +1203,6 @@ pub fn lower_fn(f: &FnDef, sigs: &SigMap) -> Result<MirFn, String> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Loc {
-
     Reg(&'static str),
 
     Spill,
@@ -1232,7 +1210,6 @@ pub enum Loc {
 
 #[derive(Debug, Clone, Default)]
 pub struct RegAlloc {
-
     pub loc: std::collections::HashMap<Vreg, Loc>,
 
     pub saved_regs: Vec<&'static str>,
@@ -1320,10 +1297,8 @@ pub fn regalloc(mir: &MirFn) -> RegAlloc {
         changed = false;
 
         for &bid in order.iter().rev() {
-
             let mut new_out: HashSet<Vreg> = HashSet::new();
             for s in succs(bid) {
-
                 // A successor's phi defs are not live into the edge: the value
                 // arrives via the phi operand (edge_uses), not as a live-through.
                 let phi_defs: HashSet<Vreg> = mir
@@ -1355,7 +1330,6 @@ pub fn regalloc(mir: &MirFn) -> RegAlloc {
                 for u in inst.uses() {
                     live.insert(u);
                 }
-
             }
             let new_in = live;
             if new_out != live_out[&bid] {
@@ -1435,7 +1409,6 @@ pub fn regalloc(mir: &MirFn) -> RegAlloc {
     let mut free_cal: Vec<&'static str> = MIR_CALLEE.to_vec();
 
     for itv in &intervals {
-
         active.retain(|a| {
             if a.end < itv.start {
                 if a.callee {
@@ -1539,7 +1512,6 @@ mod tests {
 
     #[test]
     fn float_round() {
-
         assert_eq!(Val::float(1.5), Val::FloatConst(1.5f64.to_bits()));
         assert_eq!(Val::float(-0.0), Val::FloatConst(0x8000_0000_0000_0000));
 
@@ -1609,7 +1581,6 @@ mod tests {
 
     #[test]
     fn loop_cfg() {
-
         let mut f = MirFn::new("loopy", vec![false], false);
         let entry = f.new_block();
         let header = f.new_block();
@@ -1714,7 +1685,6 @@ mod tests {
 
     #[test]
     fn lower_add() {
-
         let m = lower("fn add(a: i64, b: i64) -> i64:\n    return a + b\n");
         assert!(m.validate().is_ok());
         assert_eq!(m.n_params, 2);
@@ -1793,7 +1763,6 @@ mod tests {
 
     #[test]
     fn range_phi() {
-
         let m = lower(
             "fn s(n: i64) -> i64:\n    let t = 0\n    for i in 0..n:\n        t = t + i\n    return t\n",
         );
@@ -1834,7 +1803,6 @@ mod tests {
 
     #[test]
     fn magic_div() {
-
         let m = lower("fn r(x: i64) -> i64:\n    return x % 7\n");
         let has_modconst = m.blocks.iter().flat_map(|b| &b.insts).any(|i| {
             matches!(
@@ -1850,7 +1818,6 @@ mod tests {
 
     #[test]
     fn rt_idiv() {
-
         let m = lower("fn d(x: i64, y: i64) -> i64:\n    return x / y\n");
         let has_idiv = m.blocks.iter().flat_map(|b| &b.insts).any(|i| {
             matches!(
@@ -1941,8 +1908,7 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            let reported: std::collections::HashSet<&str> =
-                ra.saved_regs.iter().copied().collect();
+            let reported: std::collections::HashSet<&str> = ra.saved_regs.iter().copied().collect();
             assert_eq!(assigned_callee, reported, "callee set mismatch in: {src}");
         }
     }

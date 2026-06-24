@@ -62,9 +62,7 @@ pub fn parse_program(src: &str) -> Result<ast::Program, CompileError> {
 
 // Parse + collect declaration name spans (tooling/LSP). Separate entry so the
 // normal compile path stays byte-for-byte unchanged. Returns (program, decls).
-pub fn parse_spanned(
-    src: &str,
-) -> Result<(ast::Program, Vec<ast::DeclSpan>), CompileError> {
+pub fn parse_spanned(src: &str) -> Result<(ast::Program, Vec<ast::DeclSpan>), CompileError> {
     let toks = lexer::Lexer::new(src)
         .tokenize()
         .map_err(CompileError::Lex)?;

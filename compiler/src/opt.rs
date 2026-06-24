@@ -432,7 +432,6 @@ fn walk_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
 }
 
 fn opt_block(body: &mut Vec<Stmt>) {
-
     let mut out: Vec<Stmt> = Vec::with_capacity(body.len());
     for mut s in body.drain(..) {
         opt_stmt(&mut s);
@@ -442,25 +441,21 @@ fn opt_block(body: &mut Vec<Stmt>) {
                 then,
                 elifs,
                 els,
-            } => {
-                match resolve_if(&cond, &elifs) {
-
-                    IfPick::Block(which) => {
-                        let chosen = pick_block(which, then, elifs, els);
-                        out.extend(chosen);
-                    }
-
-                    IfPick::Unknown => out.push(Stmt::If {
-                        cond,
-                        then,
-                        elifs,
-                        els,
-                    }),
+            } => match resolve_if(&cond, &elifs) {
+                IfPick::Block(which) => {
+                    let chosen = pick_block(which, then, elifs, els);
+                    out.extend(chosen);
                 }
-            }
+
+                IfPick::Unknown => out.push(Stmt::If {
+                    cond,
+                    then,
+                    elifs,
+                    els,
+                }),
+            },
             Stmt::While { cond, body } => {
                 if matches!(cond, Expr::Bool(false)) {
-
                 } else {
                     out.push(Stmt::While { cond, body });
                 }
@@ -504,7 +499,6 @@ pub fn strip_srclines(body: &mut Vec<Stmt>) {
     while i < body.len() {
         if let Stmt::SrcLine(_) = &body[i] {
             if i + 1 < body.len() && !can_fault(&body[i + 1]) {
-
                 i += 1;
                 continue;
             }
@@ -522,9 +516,7 @@ fn can_fault(s: &Stmt) -> bool {
         Stmt::ExprStmt(e) => may_fault(e),
         Stmt::Return(opt) => opt.as_ref().map(may_fault).unwrap_or(false),
 
-        Stmt::If { cond, elifs, .. } => {
-            may_fault(cond) || elifs.iter().any(|(c, _)| may_fault(c))
-        }
+        Stmt::If { cond, elifs, .. } => may_fault(cond) || elifs.iter().any(|(c, _)| may_fault(c)),
         Stmt::While { cond, .. } => may_fault(cond),
         Stmt::For { iter, .. } => may_fault(iter),
 
@@ -540,7 +532,6 @@ fn may_fault(e: &Expr) -> bool {
 
         Expr::Ident(_) | Expr::SelfExpr => false,
         Expr::Unary { op, expr } => match op {
-
             UnOp::Neg | UnOp::Not => may_fault(expr),
         },
         Expr::Binary { op, lhs, rhs } => {
@@ -548,7 +539,6 @@ fn may_fault(e: &Expr) -> bool {
                 return true;
             }
             match op {
-
                 BinOp::Div | BinOp::Mod => !matches!(&**rhs, Expr::Int(d) if *d != 0),
 
                 BinOp::In | BinOp::NotIn => true,
@@ -556,9 +546,7 @@ fn may_fault(e: &Expr) -> bool {
             }
         }
         Expr::Range { lo, hi } => may_fault(lo) || may_fault(hi),
-        Expr::IfElse { cond, then, els } => {
-            may_fault(cond) || may_fault(then) || may_fault(els)
-        }
+        Expr::IfElse { cond, then, els } => may_fault(cond) || may_fault(then) || may_fault(els),
 
         _ => true,
     }
@@ -628,7 +616,6 @@ fn opt_stmt(s: &mut Stmt) {
             if let Some(b) = els {
                 opt_block(b);
             }
-
         }
         Stmt::While { cond, body } => {
             fold_here(cond);
@@ -737,7 +724,6 @@ fn fold_binary(op: BinOp, lhs: &Expr, rhs: &Expr) -> Option<Expr> {
     };
 
     match (op, lhs, rhs) {
-
         // Fold integer arithmetic with the SAME wrap48-after-wrapping-op that interp
         // uses at runtime, so a folded constant equals what either backend would have
         // computed. Div/Mod by zero is left unfolded (return None) so the fault still
@@ -888,9 +874,7 @@ fn dce_block(body: &mut Vec<Stmt>) {
         // a fallible/effecting RHS must stay even if unused, so removability is gated
         // on is_removable, not just the read count.
         let remove = if let Stmt::Let { name, value, .. } = &body[i] {
-            is_removable(value)
-                && count_reads(name, body) == 0
-                && count_assigns(name, body) == 0
+            is_removable(value) && count_reads(name, body) == 0 && count_assigns(name, body) == 0
         } else {
             false
         };
@@ -921,7 +905,6 @@ fn reads_stmt(name: &str, s: &Stmt) -> usize {
     match s {
         Stmt::Let { value, .. } => reads_expr(name, value),
         Stmt::Assign { target, value } => {
-
             let t = match target {
                 Expr::Ident(_) => 0,
                 other => reads_expr(name, other),
@@ -948,7 +931,6 @@ fn reads_stmt(name: &str, s: &Stmt) -> usize {
         }
         Stmt::While { cond, body } => reads_expr(name, cond) + count_reads(name, body),
         Stmt::For { var, iter, body } => {
-
             let _ = var;
             reads_expr(name, iter) + count_reads(name, body)
         }
@@ -976,11 +958,7 @@ fn reads_expr(name: &str, e: &Expr) -> usize {
             reads_expr(name, callee) + args.iter().map(|a| reads_expr(name, a)).sum::<usize>()
         }
         Expr::NamedCall { callee, args } => {
-            reads_expr(name, callee)
-                + args
-                    .iter()
-                    .map(|(_, a)| reads_expr(name, a))
-                    .sum::<usize>()
+            reads_expr(name, callee) + args.iter().map(|(_, a)| reads_expr(name, a)).sum::<usize>()
         }
         Expr::Method { obj, args, .. } => {
             reads_expr(name, obj) + args.iter().map(|a| reads_expr(name, a)).sum::<usize>()
@@ -999,7 +977,6 @@ fn reads_expr(name: &str, e: &Expr) -> usize {
         Expr::ListComp {
             elem, iter, cond, ..
         } => {
-
             reads_expr(name, elem)
                 + reads_expr(name, iter)
                 + cond.as_ref().map_or(0, |c| reads_expr(name, c))
@@ -1160,11 +1137,7 @@ fn cse_key(e: &Expr, assigned: &HashSet<String>) -> Option<String> {
     }
 }
 
-fn collect_cse(
-    e: &Expr,
-    assigned: &HashSet<String>,
-    counts: &mut HashMap<String, (Expr, usize)>,
-) {
+fn collect_cse(e: &Expr, assigned: &HashSet<String>, counts: &mut HashMap<String, (Expr, usize)>) {
     if let Some(k) = cse_key(e, assigned) {
         let entry = counts.entry(k).or_insert_with(|| (e.clone(), 0));
         entry.1 += 1;

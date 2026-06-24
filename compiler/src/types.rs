@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
 pub struct IntInfo {
-
     pub int_vars: HashMap<String, HashSet<String>>,
 
     pub int_ret: HashSet<String>,
@@ -35,14 +34,10 @@ impl IntInfo {
         self.float_vars.get(func).is_some_and(|s| s.contains(name))
     }
     pub fn is_flist(&self, func: &str, name: &str) -> bool {
-        self.flvars
-            .get(func)
-            .is_some_and(|s| s.contains(name))
+        self.flvars.get(func).is_some_and(|s| s.contains(name))
     }
     pub fn is_ilist(&self, func: &str, name: &str) -> bool {
-        self.ilvars
-            .get(func)
-            .is_some_and(|s| s.contains(name))
+        self.ilvars.get(func).is_some_and(|s| s.contains(name))
     }
 }
 
@@ -210,18 +205,15 @@ pub fn analyze(prog: &Program) -> IntInfo {
                     to_drop.push(v.clone());
                     continue;
                 }
-                let assigns_ok =
-                    assigns
-                        .iter()
-                        .filter(|(name, _)| name == v)
-                        .all(|(_, src)| match src {
-                            ValSrc::Expr(e) => {
-                                ilist_ok(e, &f.name, &vsnap, &rsnap, &fn_names, &ilsnap)
-                            }
-                            // A `for x in lo..hi` loop var is an int scalar, not a
-                            // list: IntRange builds the loop variable, never the list.
-                            ValSrc::IntRange | ValSrc::NonInt => false,
-                        });
+                let assigns_ok = assigns
+                    .iter()
+                    .filter(|(name, _)| name == v)
+                    .all(|(_, src)| match src {
+                        ValSrc::Expr(e) => ilist_ok(e, &f.name, &vsnap, &rsnap, &fn_names, &ilsnap),
+                        // A `for x in lo..hi` loop var is an int scalar, not a
+                        // list: IntRange builds the loop variable, never the list.
+                        ValSrc::IntRange | ValSrc::NonInt => false,
+                    });
                 if !assigns_ok {
                     to_drop.push(v.clone());
                     continue;
@@ -364,9 +356,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                     !assigns
                         .iter()
                         .filter(|(name, _)| &name == v)
-                        .all(|(_, src)| {
-                            val_float(src, &f.name, &vsnap, &rsnap, &fn_names, &lsnap)
-                        })
+                        .all(|(_, src)| val_float(src, &f.name, &vsnap, &rsnap, &fn_names, &lsnap))
                 })
                 .cloned()
                 .collect();
@@ -430,9 +420,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                     .iter()
                     .filter(|(name, _)| name == v)
                     .all(|(_, src)| match src {
-                        ValSrc::Expr(e) => {
-                            flist_ok(e, &f.name, &vsnap, &rsnap, &fn_names, &lsnap)
-                        }
+                        ValSrc::Expr(e) => flist_ok(e, &f.name, &vsnap, &rsnap, &fn_names, &lsnap),
 
                         ValSrc::IntRange | ValSrc::NonInt => false,
                     });
@@ -485,9 +473,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
                 let arg_ok = cs
                     .args
                     .get(k)
-                    .map(|a| {
-                        flist_val(a, &cs.caller, &lsnap, &flret, &fn_names)
-                    })
+                    .map(|a| flist_val(a, &cs.caller, &lsnap, &flret, &fn_names))
                     .unwrap_or(false);
                 if !arg_ok {
                     flvars.get_mut(&cs.callee).unwrap().remove(pname);
@@ -498,13 +484,7 @@ pub fn analyze(prog: &Program) -> IntInfo {
 
         for f in &fns {
             if flret.contains(&f.name)
-                && !returns_flist(
-                    f.body,
-                    &f.name,
-                    &flvars,
-                    &flret,
-                    &fn_names,
-                )
+                && !returns_flist(f.body, &f.name, &flvars, &flret, &fn_names)
             {
                 flret.remove(&f.name);
                 changed = true;
@@ -639,7 +619,6 @@ fn val_float(
     flist: &HashMap<String, HashSet<String>>,
 ) -> bool {
     match src {
-
         ValSrc::IntRange | ValSrc::NonInt => false,
         ValSrc::Expr(e) => is_fexpr(e, func, vars, ret, fns, flist),
     }
@@ -706,7 +685,6 @@ fn float_arith(op: BinOp) -> bool {
 
 #[derive(Default)]
 struct FlistFacts {
-
     bad_use: HashSet<String>,
 
     pushes: Vec<(String, Expr)>,
@@ -745,7 +723,6 @@ fn flist_bad(e: &Expr, facts: &mut FlistFacts) {
             }
         }
         Expr::Method { obj, args, .. } => {
-
             flist_bad(obj, facts);
             for a in args {
                 flist_bad(a, facts);
@@ -753,7 +730,6 @@ fn flist_bad(e: &Expr, facts: &mut FlistFacts) {
         }
         Expr::Field { obj, .. } => flist_bad(obj, facts),
         Expr::Index { obj, index } => {
-
             if !matches!(&**obj, Expr::Ident(_)) {
                 flist_bad(obj, facts);
             }
@@ -809,19 +785,15 @@ fn flist_bad(e: &Expr, facts: &mut FlistFacts) {
                 }
             }
         }
-        Expr::Lambda { .. } => {
-
-        }
+        Expr::Lambda { .. } => {}
         _ => {}
     }
 }
 
 fn flist_visit(e: &Expr, facts: &mut FlistFacts) {
     match e {
-
         Expr::Index { obj, index } => {
             if let Expr::Ident(_) = &**obj {
-
                 flist_visit(index, facts);
             } else {
                 flist_visit(obj, facts);
@@ -835,7 +807,6 @@ fn flist_visit(e: &Expr, facts: &mut FlistFacts) {
             let receiver_safe =
                 matches!(&**obj, Expr::Ident(_)) && (name == "len" || name == "push");
             if receiver_safe {
-
                 if name == "push" {
                     if let Expr::Ident(n) = &**obj {
                         for a in args {
@@ -848,7 +819,6 @@ fn flist_visit(e: &Expr, facts: &mut FlistFacts) {
                     flist_visit(a, facts);
                 }
             } else {
-
                 flist_bad(obj, facts);
                 for a in args {
                     flist_bad(a, facts);
@@ -934,30 +904,26 @@ fn flist_visit(e: &Expr, facts: &mut FlistFacts) {
 
 fn flist_stmt(st: &Stmt, facts: &mut FlistFacts) {
     match st {
-
         Stmt::Let { value, .. } => flist_visit(value, facts),
-        Stmt::Assign { target, value } => {
-            match target {
-
-                Expr::Index { obj, index } => {
-                    if let Expr::Ident(n) = &**obj {
-                        facts.index_stores.push((n.clone(), value.clone()));
-                        flist_visit(index, facts);
-                    } else {
-                        flist_visit(obj, facts);
-                        flist_visit(index, facts);
-                    }
-                    flist_visit(value, facts);
+        Stmt::Assign { target, value } => match target {
+            Expr::Index { obj, index } => {
+                if let Expr::Ident(n) = &**obj {
+                    facts.index_stores.push((n.clone(), value.clone()));
+                    flist_visit(index, facts);
+                } else {
+                    flist_visit(obj, facts);
+                    flist_visit(index, facts);
                 }
-
-                Expr::Ident(_) => flist_visit(value, facts),
-
-                other => {
-                    flist_visit(other, facts);
-                    flist_visit(value, facts);
-                }
+                flist_visit(value, facts);
             }
-        }
+
+            Expr::Ident(_) => flist_visit(value, facts),
+
+            other => {
+                flist_visit(other, facts);
+                flist_visit(value, facts);
+            }
+        },
         Stmt::ExprStmt(e) => flist_visit(e, facts),
         Stmt::Return(Some(e)) => {
             // Returning a value lets it escape this function under an unknown
@@ -993,7 +959,6 @@ fn flist_stmt(st: &Stmt, facts: &mut FlistFacts) {
             }
         }
         Stmt::For { iter, body, .. } => {
-
             flist_visit(iter, facts);
             for s in body {
                 flist_stmt(s, facts);
@@ -1027,7 +992,6 @@ fn flist_ok(
             .iter()
             .all(|el| is_fexpr(el, func, fvars, fret, fns, flist)),
         Expr::ListComp { elem, var, .. } => {
-
             let _ = var;
             is_fexpr(elem, func, fvars, fret, fns, flist)
         }
@@ -1294,14 +1258,12 @@ fn escaped_fns(fns: &[FnView], fn_names: &HashSet<String>) -> HashSet<String> {
     let mut escaped: HashSet<String> = HashSet::new();
     fn ve(e: &Expr, fn_names: &HashSet<String>, out: &mut HashSet<String>) {
         match e {
-
             Expr::Ident(n) => {
                 if fn_names.contains(n) {
                     out.insert(n.clone());
                 }
             }
             Expr::Call { callee, args } => {
-
                 if !matches!(&**callee, Expr::Ident(_)) {
                     ve(callee, fn_names, out);
                 }
@@ -1310,7 +1272,6 @@ fn escaped_fns(fns: &[FnView], fn_names: &HashSet<String>) -> HashSet<String> {
                 }
             }
             Expr::Closure { fn_name, captures } => {
-
                 if fn_names.contains(fn_name) {
                     out.insert(fn_name.clone());
                 }
@@ -1774,7 +1735,6 @@ mod tests {
 
     #[test]
     fn mixed_notint() {
-
         let src =
             "fn dbl(x):\n    return x + x\nfn main():\n    print(dbl(1))\n    print(dbl(1.5))\n";
         let i = info(src);
@@ -1804,7 +1764,6 @@ mod tests {
 
     #[test]
     fn comp_notint() {
-
         let src = "fn dbl(x):\n    return x * 2\nfn main():\n    print([dbl(c) for c in \"ab\"])\n";
         let i = info(src);
         assert!(
@@ -1821,7 +1780,6 @@ mod tests {
 
     #[test]
     fn esc_notint() {
-
         let src = "fn inc(x):\n    return x + 1\nfn apply(f, v):\n    return f(v)\nfn main():\n    print(apply(inc, 5))\n";
         let i = info_lifted(src);
         assert!(
@@ -1832,7 +1790,6 @@ mod tests {
 
     #[test]
     fn cap_notint() {
-
         let src = "fn make_rng(seed):\n    let state = seed\n    return fn():\n        state = state + 1\n        return state\nfn main():\n    let r = make_rng(0)\n    print(r())\n";
         let i = info_lifted(src);
         for (fname, vars) in &i.int_vars {
@@ -1847,7 +1804,6 @@ mod tests {
 
     #[test]
     fn meth_notint() {
-
         let src = "fn helper(x):\n    return x + 1\nstruct S:\n    v: int\nimpl S:\n    fn go(self):\n        return helper(self.v)\nfn main():\n    let s = S(v: 3)\n    print(s.go())\n";
         let i = info_lifted(src);
         assert!(

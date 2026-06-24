@@ -8,7 +8,6 @@ use crate::ast::*;
 use std::collections::HashSet;
 
 pub fn lift_program(prog: &mut Program) {
-
     let mut globals: HashSet<String> = HashSet::new();
     for item in prog.iter() {
         if let Item::Fn(f) = item {
@@ -163,7 +162,6 @@ impl Lifter {
     }
 
     fn lift_expr(&mut self, e: &mut Expr, celled: &HashSet<String>) {
-
         match e {
             Expr::Unary { expr, .. } => self.lift_expr(expr, celled),
             Expr::Binary { lhs, rhs, .. } => {
@@ -307,7 +305,6 @@ fn cell_stmt(s: &mut Stmt, celled: &HashSet<String>) {
         Stmt::Let { name, value, .. } => {
             cell_expr(value, celled);
             if celled.contains(name) {
-
                 let init = std::mem::replace(value, Expr::Nil);
                 *value = Expr::List(vec![init]);
             }
@@ -377,7 +374,6 @@ fn cell_stmt(s: &mut Stmt, celled: &HashSet<String>) {
 
 fn cell_expr(e: &mut Expr, celled: &HashSet<String>) {
     match e {
-
         Expr::Ident(n) => {
             if celled.contains(n) {
                 *e = cell_index(n);
@@ -672,7 +668,6 @@ fn is_assigned(s: &Stmt, out: &mut HashSet<String>) {
 
 fn assigned_expr(e: &Expr, out: &mut HashSet<String>) {
     match e {
-
         Expr::Lambda { body, .. } => {
             for s in body {
                 is_assigned(s, out);
@@ -799,7 +794,6 @@ fn free_vars(e: &Expr, bound: &HashSet<String>, out: &mut Vec<String>) {
             iter,
             cond,
         } => {
-
             free_vars(iter, bound, out);
             let mut inner = bound.clone();
             inner.insert(var.clone());
@@ -889,7 +883,6 @@ fn fv_stmt(s: &Stmt, bound: &mut HashSet<String>, out: &mut Vec<String>) {
             catch_var,
             catch_body,
         } => {
-
             fv_scoped(body, bound, out);
             let mut inner = bound.clone();
             inner.insert(catch_var.clone());

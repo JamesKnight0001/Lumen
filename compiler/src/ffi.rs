@@ -178,7 +178,6 @@ fn is_fty(t: &Type) -> bool {
 pub fn call_dll(spec: &(String, ExternFn), args: &[Value]) -> Result<Value, String> {
     let (lib, ef) = spec;
     if args.len() > 4 {
-
         return Err(format!(
             "FFI: the interpreter supports at most 4 arguments (got {}); \
              compile with `lumen build` for more",
@@ -200,11 +199,7 @@ pub fn call_dll(spec: &(String, ExternFn), args: &[Value]) -> Result<Value, Stri
         let mut pin: Vec<CString> = Vec::new();
         let mut words = [0i64; 4];
         for (i, v) in args.iter().enumerate() {
-            let want_float = ef
-                .params
-                .get(i)
-                .map(|p| is_fty(&p.ty))
-                .unwrap_or(false);
+            let want_float = ef.params.get(i).map(|p| is_fty(&p.ty)).unwrap_or(false);
             words[i] = val_word(v, want_float, &mut pin)?;
         }
 

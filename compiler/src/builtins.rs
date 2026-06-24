@@ -6,7 +6,6 @@
 use crate::interp::Value;
 
 pub struct ModuleFn {
-
     pub module: &'static str,
 
     pub name: &'static str,
@@ -152,7 +151,6 @@ fn com_vcall(_obj: i64, _slot: i64, _args: &[u8], _rkind: i64) -> Result<Value, 
 // days-from-civil algorithm (the 719468 / 146097 era math), so we avoid pulling
 // in a date library. div_euclid/rem_euclid keep it correct for negative epochs.
 fn fmt_epoch(epoch_secs: i64) -> String {
-
     let days = epoch_secs.div_euclid(86_400);
     let day_secs = epoch_secs.rem_euclid(86_400);
     let hour = day_secs / 3600;
@@ -303,7 +301,6 @@ fn json_val(b: &[u8], pos: &mut usize) -> Option<Value> {
 }
 
 fn json_str(b: &[u8], pos: &mut usize) -> Option<String> {
-
     *pos += 1;
     let mut s = String::new();
     while *pos < b.len() && b[*pos] != b'"' {
@@ -336,7 +333,6 @@ fn json_str(b: &[u8], pos: &mut usize) -> Option<String> {
                 other => s.push(other as char),
             }
         } else {
-
             s.push(c as char);
         }
     }
@@ -711,7 +707,6 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
         symbol: "lumen_math_isinf",
         eval: |a| Ok(Value::Bool(as_f(arg(a, 0)?)?.is_infinite())),
     },
-
     ModuleFn {
         module: "math",
         name: "gcd",
@@ -765,7 +760,6 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
             Ok(Value::Int(r))
         },
     },
-
     ModuleFn {
         module: "math",
         name: "fmod",
@@ -801,7 +795,6 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
         symbol: "lumen_math_isfinite",
         eval: |a| Ok(Value::Bool(as_f(arg(a, 0)?)?.is_finite())),
     },
-
     ModuleFn {
         module: "os",
         name: "read",
@@ -809,7 +802,6 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
         symbol: "lumen_os_read",
         eval: |a| {
             Ok(match std::fs::read(str_arg(a, 0)) {
-
                 Ok(bytes) => str_val(String::from_utf8_lossy(&bytes).into_owned()),
                 Err(_) => Value::Nil,
             })
@@ -900,18 +892,16 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
         name: "listdir",
         arity: 1,
         symbol: "lumen_os_listdir",
-        eval: |a| {
-            match std::fs::read_dir(str_arg(a, 0)) {
-                Ok(rd) => {
-                    let mut names: Vec<String> = rd
-                        .filter_map(|e| e.ok())
-                        .map(|e| e.file_name().to_string_lossy().into_owned())
-                        .collect();
-                    names.sort();
-                    Ok(list_val(names.into_iter().map(str_val).collect()))
-                }
-                Err(_) => Ok(Value::Nil),
+        eval: |a| match std::fs::read_dir(str_arg(a, 0)) {
+            Ok(rd) => {
+                let mut names: Vec<String> = rd
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                Ok(list_val(names.into_iter().map(str_val).collect()))
             }
+            Err(_) => Ok(Value::Nil),
         },
     },
     ModuleFn {
@@ -932,7 +922,6 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
         arity: 2,
         symbol: "lumen_os_setenv",
         eval: |a| {
-
             std::env::set_var(str_arg(a, 0), str_arg(a, 1));
             Ok(Value::Bool(true))
         },
@@ -1007,7 +996,6 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
             Ok(str_val(p.to_string()))
         },
     },
-
     ModuleFn {
         module: "os",
         name: "system",
@@ -1074,7 +1062,6 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
 
         eval: |_| Ok(list_val(std::env::args().map(str_val).collect())),
     },
-
     ModuleFn {
         module: "rand",
         name: "seed",
@@ -1121,7 +1108,6 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
             Ok(Value::Float(r as f64 / 9007199254740992.0))
         },
     },
-
     ModuleFn {
         module: "time",
         name: "now",
@@ -1158,7 +1144,6 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
             Ok(Value::Nil)
         },
     },
-
     ModuleFn {
         module: "json",
         name: "stringify",
@@ -1192,7 +1177,6 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
             }
         },
     },
-
     ModuleFn {
         module: "cffi",
         name: "cbuf",
@@ -1226,7 +1210,6 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
             Ok(Value::Int(ptr))
         },
     },
-
     ModuleFn {
         module: "cffi",
         name: "set_i8",
@@ -1304,7 +1287,6 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
             })
         },
     },
-
     ModuleFn {
         module: "cffi",
         name: "get_i8",
@@ -1385,7 +1367,6 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
             Ok(Value::Float(f64::from_le_bytes(x)))
         },
     },
-
     ModuleFn {
         module: "cffi",
         name: "vcall",
@@ -1403,7 +1384,6 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
             com_vcall(obj, slot, &args, ret_kind)
         },
     },
-
     ModuleFn {
         module: "cffi",
         name: "peek_i64",
@@ -1482,15 +1462,12 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
             }
 
             let d = vec![
-                b[3], b[2], b[1], b[0],
-                b[5], b[4],
-                b[7], b[6],
-                b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+                b[3], b[2], b[1], b[0], b[5], b[4], b[7], b[6], b[8], b[9], b[10], b[11], b[12],
+                b[13], b[14], b[15],
             ];
             Ok(Value::CBuf(std::rc::Rc::new(std::cell::RefCell::new(d))))
         },
     },
-
     ModuleFn {
         module: "cffi",
         name: "callback",
@@ -1507,23 +1484,125 @@ pub static MODULE_FUNCS: &[ModuleFn] = &[
     },
     // net: Winsock2 TCP/UDP sockets. A socket is an int handle (-1 = error).
     // Native side: lumen_net_* in lumen_rt.c. Windows-only.
-    ModuleFn { module: "net", name: "listen", arity: 2, symbol: "lumen_net_listen", eval: |a| crate::net::listen(a) },
-    ModuleFn { module: "net", name: "accept", arity: 1, symbol: "lumen_net_accept", eval: |a| crate::net::accept(a) },
-    ModuleFn { module: "net", name: "connect", arity: 2, symbol: "lumen_net_connect", eval: |a| crate::net::connect(a) },
-    ModuleFn { module: "net", name: "udp", arity: 2, symbol: "lumen_net_udp", eval: |a| crate::net::udp(a) },
-    ModuleFn { module: "net", name: "send", arity: 2, symbol: "lumen_net_send", eval: |a| crate::net::send(a) },
-    ModuleFn { module: "net", name: "recv", arity: 2, symbol: "lumen_net_recv", eval: |a| crate::net::recv(a) },
-    ModuleFn { module: "net", name: "sendto", arity: 4, symbol: "lumen_net_sendto", eval: |a| crate::net::sendto(a) },
-    ModuleFn { module: "net", name: "recvfrom", arity: 2, symbol: "lumen_net_recvfrom", eval: |a| crate::net::recvfrom(a) },
-    ModuleFn { module: "net", name: "close", arity: 1, symbol: "lumen_net_close", eval: |a| crate::net::close(a) },
-    ModuleFn { module: "net", name: "shutdown", arity: 2, symbol: "lumen_net_shutdown", eval: |a| crate::net::shutdown(a) },
-    ModuleFn { module: "net", name: "set_timeout", arity: 2, symbol: "lumen_net_set_timeout", eval: |a| crate::net::set_timeout(a) },
-    ModuleFn { module: "net", name: "set_blocking", arity: 2, symbol: "lumen_net_set_blocking", eval: |a| crate::net::set_blocking(a) },
-    ModuleFn { module: "net", name: "set_opt", arity: 3, symbol: "lumen_net_set_opt", eval: |a| crate::net::set_opt(a) },
-    ModuleFn { module: "net", name: "poll", arity: 2, symbol: "lumen_net_poll", eval: |a| crate::net::poll(a) },
-    ModuleFn { module: "net", name: "resolve", arity: 1, symbol: "lumen_net_resolve", eval: |a| crate::net::resolve(a) },
-    ModuleFn { module: "net", name: "local_port", arity: 1, symbol: "lumen_net_local_port", eval: |a| crate::net::local_port(a) },
-    ModuleFn { module: "net", name: "errno", arity: 0, symbol: "lumen_net_errno", eval: |a| crate::net::errno(a) },
+    ModuleFn {
+        module: "net",
+        name: "listen",
+        arity: 2,
+        symbol: "lumen_net_listen",
+        eval: |a| crate::net::listen(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "accept",
+        arity: 1,
+        symbol: "lumen_net_accept",
+        eval: |a| crate::net::accept(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "connect",
+        arity: 2,
+        symbol: "lumen_net_connect",
+        eval: |a| crate::net::connect(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "udp",
+        arity: 2,
+        symbol: "lumen_net_udp",
+        eval: |a| crate::net::udp(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "send",
+        arity: 2,
+        symbol: "lumen_net_send",
+        eval: |a| crate::net::send(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "recv",
+        arity: 2,
+        symbol: "lumen_net_recv",
+        eval: |a| crate::net::recv(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "sendto",
+        arity: 4,
+        symbol: "lumen_net_sendto",
+        eval: |a| crate::net::sendto(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "recvfrom",
+        arity: 2,
+        symbol: "lumen_net_recvfrom",
+        eval: |a| crate::net::recvfrom(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "close",
+        arity: 1,
+        symbol: "lumen_net_close",
+        eval: |a| crate::net::close(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "shutdown",
+        arity: 2,
+        symbol: "lumen_net_shutdown",
+        eval: |a| crate::net::shutdown(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "set_timeout",
+        arity: 2,
+        symbol: "lumen_net_set_timeout",
+        eval: |a| crate::net::set_timeout(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "set_blocking",
+        arity: 2,
+        symbol: "lumen_net_set_blocking",
+        eval: |a| crate::net::set_blocking(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "set_opt",
+        arity: 3,
+        symbol: "lumen_net_set_opt",
+        eval: |a| crate::net::set_opt(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "poll",
+        arity: 2,
+        symbol: "lumen_net_poll",
+        eval: |a| crate::net::poll(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "resolve",
+        arity: 1,
+        symbol: "lumen_net_resolve",
+        eval: |a| crate::net::resolve(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "local_port",
+        arity: 1,
+        symbol: "lumen_net_local_port",
+        eval: |a| crate::net::local_port(a),
+    },
+    ModuleFn {
+        module: "net",
+        name: "errno",
+        arity: 0,
+        symbol: "lumen_net_errno",
+        eval: |a| crate::net::errno(a),
+    },
 ];
 
 pub fn is_module(name: &str) -> bool {
@@ -1599,10 +1678,23 @@ mod tests {
     #[test]
     fn net_ok() {
         for (name, arity) in [
-            ("listen", 2u8), ("accept", 1), ("connect", 2), ("udp", 2),
-            ("send", 2), ("recv", 2), ("sendto", 4), ("recvfrom", 2),
-            ("close", 1), ("shutdown", 2), ("set_timeout", 2), ("set_blocking", 2),
-            ("set_opt", 3), ("poll", 2), ("resolve", 1), ("local_port", 1), ("errno", 0),
+            ("listen", 2u8),
+            ("accept", 1),
+            ("connect", 2),
+            ("udp", 2),
+            ("send", 2),
+            ("recv", 2),
+            ("sendto", 4),
+            ("recvfrom", 2),
+            ("close", 1),
+            ("shutdown", 2),
+            ("set_timeout", 2),
+            ("set_blocking", 2),
+            ("set_opt", 3),
+            ("poll", 2),
+            ("resolve", 1),
+            ("local_port", 1),
+            ("errno", 0),
         ] {
             let f = lookup("net", name).unwrap_or_else(|| panic!("net.{name} missing"));
             assert_eq!(f.arity, arity, "net.{name} arity");
@@ -1611,7 +1703,6 @@ mod tests {
 
     #[test]
     fn rand_seedable() {
-
         let seed = lookup("rand", "seed").expect("rand.seed missing");
         let rint = lookup("rand", "int").expect("rand.int missing");
         assert!(lookup("rand", "float").is_some());
@@ -1677,7 +1768,6 @@ mod tests {
 
     #[test]
     fn symbols_unique() {
-
         let mut syms: Vec<&str> = super::MODULE_FUNCS.iter().map(|f| f.symbol).collect();
         let n = syms.len();
         syms.sort_unstable();

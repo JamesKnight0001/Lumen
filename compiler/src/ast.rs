@@ -259,7 +259,6 @@ pub const LUMEN_INT_BITS: u32 = 48;
 // shift up and arithmetic-shift back down to recover the sign. Every int op
 // funnels through this so the interpreter and codegen overflow identically.
 pub fn wrap48(n: i64) -> i64 {
-
     let masked = (n as u64) & ((1u64 << LUMEN_INT_BITS) - 1);
     let shift = 64 - LUMEN_INT_BITS;
     ((masked << shift) as i64) >> shift

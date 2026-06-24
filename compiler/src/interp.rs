@@ -153,7 +153,6 @@ impl fmt::Display for Value {
         match self {
             Value::Int(n) => write!(f, "{}", n),
             Value::Float(x) => {
-
                 if x.fract() == 0.0 && x.is_finite() {
                     write!(f, "{:.1}", x)
                 } else {
@@ -269,7 +268,6 @@ impl Interp {
                     self.funcs.insert(f.name.clone(), Rc::new(f.clone()));
                 }
                 Item::Struct(s) => {
-
                     let entry = self.structs.entry(s.name.clone()).or_insert_with(|| {
                         Rc::new(StructDef {
                             name: s.name.clone(),
@@ -293,7 +291,7 @@ impl Interp {
                             .insert(ef.name.clone(), (b.lib.clone(), ef.clone()));
                     }
                 }
-                Item::Import(_) => {  }
+                Item::Import(_) => {}
                 Item::Stmt(s) => top_stmts.push(s.clone()),
             }
         }
@@ -439,7 +437,6 @@ impl Interp {
                 Ok(Flow::Normal)
             }
             Stmt::Return(opt) => {
-
                 // Detect `return f(args)` where f is the enclosing self-recursive
                 // function with matching arity, and turn it into a TailCall the
                 // trampoline can loop on. Args are evaluated in the current frame
@@ -447,7 +444,6 @@ impl Interp {
                 if let Some(Expr::Call { callee, args }) = opt {
                     if let (Some((tname, tarity)), Expr::Ident(n)) = (&self.tail_fn, &**callee) {
                         if n == tname && args.len() == *tarity {
-
                             let tname = tname.clone();
 
                             let saved = self.tail_fn.take();
@@ -511,7 +507,6 @@ impl Interp {
             Stmt::Break => Ok(Flow::Break),
             Stmt::Continue => Ok(Flow::Continue),
             Stmt::Raise(e) => {
-
                 let v = self.eval(e, env)?;
                 Err(format!("{}", v))
             }
@@ -519,16 +514,13 @@ impl Interp {
                 body,
                 catch_var,
                 catch_body,
-            } => {
-
-                match self.exec_block(body, env) {
-                    Ok(flow) => Ok(flow),
-                    Err(msg) => {
-                        env.insert(catch_var.clone(), Value::Str(Rc::new(msg)));
-                        self.exec_block(catch_body, env)
-                    }
+            } => match self.exec_block(body, env) {
+                Ok(flow) => Ok(flow),
+                Err(msg) => {
+                    env.insert(catch_var.clone(), Value::Str(Rc::new(msg)));
+                    self.exec_block(catch_body, env)
                 }
-            }
+            },
             Stmt::SrcLine(n) => {
                 self.current_line = *n;
                 Ok(Flow::Normal)
@@ -571,7 +563,6 @@ impl Interp {
 
     fn eval(&mut self, e: &Expr, env: &mut HashMap<String, Value>) -> Result<Value, String> {
         match e {
-
             Expr::Lambda { .. } => Err("internal: unlifted lambda in interpreter".into()),
             Expr::Closure { fn_name, captures } => {
                 let def = self
@@ -602,7 +593,6 @@ impl Interp {
                 .cloned()
                 .or_else(|| self.globals.get(n).cloned())
                 .or_else(|| {
-
                     self.funcs
                         .get(n)
                         .map(|f| Value::Func(f.clone(), Rc::new(Vec::new())))
@@ -690,7 +680,6 @@ impl Interp {
                 }
             }
             Expr::Binary { op, lhs, rhs } => {
-
                 // `and`/`or` short-circuit: the rhs is not evaluated when the lhs
                 // already decides the result. Both sides still go through strict
                 // truthy(), so non-bool operands are an error rather than coerced.
@@ -783,7 +772,6 @@ impl Interp {
                 }
             }
             Expr::Method { obj, name, args } => {
-
                 if let Expr::Ident(modname) = &**obj {
                     if crate::builtins::is_module(modname) {
                         let mut a = Vec::new();
@@ -863,7 +851,6 @@ impl Interp {
                             return Ok(Value::Int(n));
                         }
                         "join" => {
-
                             let sep = match self.eval(&args[0], env)? {
                                 Value::Str(s) => s.to_string(),
                                 _ => return Err("join separator must be a string".into()),
@@ -922,7 +909,6 @@ impl Interp {
                         "upper" => return Ok(Value::Str(Rc::new(s.to_uppercase()))),
                         "lower" => return Ok(Value::Str(Rc::new(s.to_lowercase()))),
                         "trim" => {
-
                             let t =
                                 s.trim_matches(|c| c == ' ' || c == '\t' || c == '\n' || c == '\r');
                             return Ok(Value::Str(Rc::new(t.to_string())));
@@ -1080,7 +1066,6 @@ impl Interp {
                             return Ok(Value::Str(Rc::new(out)));
                         }
                         "join" => {
-
                             if let Value::List(items) = self.eval(&args[0], env)? {
                                 let parts: Vec<String> =
                                     items.borrow().iter().map(|v| format!("{}", v)).collect();
@@ -1089,7 +1074,6 @@ impl Interp {
                             return Err("join arg must be a list".into());
                         }
                         "repeat" => {
-
                             let n = match self.eval(&args[0], env)? {
                                 Value::Int(n) => n,
                                 _ => return Err("repeat arg must be an int".into()),
@@ -1102,7 +1086,6 @@ impl Interp {
                             return Ok(Value::Str(Rc::new(out)));
                         }
                         "title" => {
-
                             let bytes = s.as_bytes();
                             let mut out = String::with_capacity(s.len());
                             let mut at_wstart = true;
@@ -1140,7 +1123,6 @@ impl Interp {
                 Err(format!("no method '{}' on value", name))
             }
             Expr::Call { callee, args } => {
-
                 let name = match &**callee {
                     Expr::Ident(n) => n.clone(),
                     other => {
@@ -1435,7 +1417,6 @@ impl Interp {
                     for (p, a) in f.params.iter().zip(vals) {
                         local.insert(p.name.clone(), a);
                     }
-
                 }
                 Ok(Flow::Return(v)) => break Ok(v),
                 Ok(_) => break Ok(Value::Nil),
@@ -1452,7 +1433,6 @@ impl Interp {
         args: Vec<Value>,
         captured: &Rc<Vec<Value>>,
     ) -> Result<Value, String> {
-
         let mut local: HashMap<String, Value> = HashMap::new();
         // Captured values come first, then the call args, matching the order they
         // were collected in the Closure case above and how native lays out the frame.
@@ -1496,7 +1476,6 @@ impl Interp {
     fn binop(&self, op: BinOp, l: Value, r: Value) -> Result<Value, String> {
         use Value::*;
         Ok(match (op, l, r) {
-
             // Integer arithmetic wraps to 48 bits (wrap48 after a 64-bit wrapping op).
             // 48 bits is the NaN-box payload width, so every result must round-trip
             // through it identically on the native side. Never use checked/native +.
